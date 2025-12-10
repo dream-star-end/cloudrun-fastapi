@@ -65,13 +65,14 @@ async def recognize_image_stream(request: RecognizeRequest):
                     recognize_type=request.recognize_type.value,
                     custom_prompt=request.custom_prompt,
                 ):
-                    # SSE 格式，使用 JSON 编码确保中文字符正确传输
-                    yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
+                    # SSE 格式，使用 JSON 编码（ensure_ascii=True 默认值）
+                    # 中文会被转为 \uXXXX 格式，确保传输的全是 ASCII 字符
+                    yield f"data: {json.dumps({'content': chunk})}\n\n"
                 
                 yield "data: [DONE]\n\n"
                 
             except Exception as e:
-                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
         
         return StreamingResponse(
             generate(),
