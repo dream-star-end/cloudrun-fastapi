@@ -2,6 +2,7 @@
 AI 对话 API 路由
 支持流式和非流式响应
 """
+import json
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from ..models import ChatRequest, ChatResponse
@@ -59,13 +60,14 @@ async def chat_stream(request: ChatRequest):
                     max_tokens=request.max_tokens,
                     user_memory=request.user_memory,
                 ):
-                    # SSE 格式
-                    yield f"data: {chunk}\n\n"
+                    # SSE 格式，使用 JSON 编码确保中文字符正确传输
+                    # ensure_ascii=False 保持中文可读，但在传输层会被正确编码
+                    yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
                 
                 yield "data: [DONE]\n\n"
                 
             except Exception as e:
-                yield f"data: [ERROR] {str(e)}\n\n"
+                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
         
         return StreamingResponse(
             generate(),
