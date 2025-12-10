@@ -3,6 +3,7 @@
 支持 OCR、图片解释、公式识别等
 支持流式和非流式响应
 """
+import json
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from ..models import RecognizeRequest, RecognizeResponse
@@ -64,13 +65,13 @@ async def recognize_image_stream(request: RecognizeRequest):
                     recognize_type=request.recognize_type.value,
                     custom_prompt=request.custom_prompt,
                 ):
-                    # SSE 格式
-                    yield f"data: {chunk}\n\n"
+                    # SSE 格式，使用 JSON 编码确保中文字符正确传输
+                    yield f"data: {json.dumps({'content': chunk}, ensure_ascii=False)}\n\n"
                 
                 yield "data: [DONE]\n\n"
                 
             except Exception as e:
-                yield f"data: [ERROR] {str(e)}\n\n"
+                yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
         
         return StreamingResponse(
             generate(),
