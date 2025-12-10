@@ -139,6 +139,36 @@ class AIService:
                         except json.JSONDecodeError:
                             continue
     
+    # 图片识别提示词映射
+    RECOGNIZE_PROMPTS = {
+        "ocr": "请识别并提取图片中的所有文字内容，保持原有的格式和结构。如果有表格，请用Markdown表格格式输出。",
+        "explain": "请详细解释这张图片的内容，包括文字、图表、公式等，并给出通俗易懂的解释。如果是学习材料，请重点解析知识点。",
+        "summary": "请用简洁的语言总结这张图片的主要内容和关键信息。列出3-5个要点。",
+        "formula": "请识别图片中的数学公式或方程式，用LaTeX格式输出（使用$...$包裹），并解释其含义和应用场景。",
+    }
+    
+    @classmethod
+    def _build_vision_messages(
+        cls,
+        image_url: str,
+        recognize_type: str = "ocr",
+        custom_prompt: Optional[str] = None,
+    ) -> List[Dict]:
+        """构建视觉模型消息"""
+        prompt = custom_prompt if custom_prompt else cls.RECOGNIZE_PROMPTS.get(
+            recognize_type, "请描述这张图片的内容。"
+        )
+        
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                ],
+            }
+        ]
+    
     @classmethod
     async def recognize_image(
         cls,
@@ -147,7 +177,7 @@ class AIService:
         custom_prompt: Optional[str] = None,
     ) -> str:
         """
-        图片识别
+        图片识别（非流式）
         
         Args:
             image_url: 图片 URL
@@ -157,29 +187,8 @@ class AIService:
         Returns:
             识别结果
         """
-        # 构建提示词
-        if custom_prompt:
-            prompt = custom_prompt
-        else:
-            prompts = {
-                "ocr": "请识别并提取图片中的所有文字内容，保持原有的格式和结构。如果有表格，请用Markdown表格格式输出。",
-                "explain": "请详细解释这张图片的内容，包括文字、图表、公式等，并给出通俗易懂的解释。如果是学习材料，请重点解析知识点。",
-                "summary": "请用简洁的语言总结这张图片的主要内容和关键信息。列出3-5个要点。",
-                "formula": "请识别图片中的数学公式或方程式，用LaTeX格式输出（使用$...$包裹），并解释其含义和应用场景。",
-            }
-            prompt = prompts.get(recognize_type, "请描述这张图片的内容。")
-        
         config = AI_MODELS["vision"]
-        
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                ],
-            }
-        ]
+        messages = cls._build_vision_messages(image_url, recognize_type, custom_prompt)
         
         async with httpx.AsyncClient(timeout=120.0) as client:
             response = await client.post(
@@ -192,6 +201,7 @@ class AIService:
                     "model": config["model"],
                     "messages": messages,
                     "max_tokens": config["max_tokens"],
+                    "stream": False,
                 },
             )
             
@@ -202,6 +212,59 @@ class AIService:
                 return data["choices"][0]["message"]["content"]
             
             raise ValueError("视觉 AI 返回格式错误")
+    
+    @classmethod
+    async def recognize_image_stream(
+        cls,
+        image_url: str,
+        recognize_type: str = "ocr",
+        custom_prompt: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        图片识别（流式）
+        
+        Args:
+            image_url: 图片 URL
+            recognize_type: 识别类型 (ocr/explain/summary/formula)
+            custom_prompt: 自定义提示词
+        
+        Yields:
+            识别结果片段
+        """
+        config = AI_MODELS["vision"]
+        messages = cls._build_vision_messages(image_url, recognize_type, custom_prompt)
+        
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            async with client.stream(
+                "POST",
+                f"{config['base_url']}/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config['api_key']}",
+                },
+                json={
+                    "model": config["model"],
+                    "messages": messages,
+                    "max_tokens": config["max_tokens"],
+                    "stream": True,
+                },
+            ) as response:
+                response.raise_for_status()
+                
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data_str = line[6:]
+                        if data_str == "[DONE]":
+                            break
+                        
+                        try:
+                            data = json.loads(data_str)
+                            if data.get("choices") and data["choices"][0].get("delta"):
+                                content = data["choices"][0]["delta"].get("content", "")
+                                if content:
+                                    yield content
+                        except json.JSONDecodeError:
+                            continue
     
     @classmethod
     async def analyze_mistake(

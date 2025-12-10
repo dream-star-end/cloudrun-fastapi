@@ -1,8 +1,10 @@
 """
 图片识别 API 路由
 支持 OCR、图片解释、公式识别等
+支持流式和非流式响应
 """
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from ..models import RecognizeRequest, RecognizeResponse
 from ..services.ai_service import AIService
 
@@ -12,7 +14,7 @@ router = APIRouter(prefix="/api/recognize", tags=["图片识别"])
 @router.post("", response_model=RecognizeResponse)
 async def recognize_image(request: RecognizeRequest):
     """
-    图片识别接口
+    图片识别接口（非流式）
     
     - **image_url**: 图片 URL（支持 http/https/base64）
     - **recognize_type**: 识别类型
@@ -33,6 +35,51 @@ async def recognize_image(request: RecognizeRequest):
             success=True,
             result=result,
             recognize_type=request.recognize_type.value,
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/stream")
+async def recognize_image_stream(request: RecognizeRequest):
+    """
+    图片识别接口（流式响应 SSE）
+    
+    返回 Server-Sent Events 格式的流式数据
+    
+    - **image_url**: 图片 URL（支持 http/https/base64）
+    - **recognize_type**: 识别类型
+        - `ocr`: 文字识别
+        - `explain`: 图片解释
+        - `summary`: 内容总结
+        - `formula`: 公式识别
+    - **custom_prompt**: 自定义提示词（可选）
+    """
+    try:
+        async def generate():
+            try:
+                async for chunk in AIService.recognize_image_stream(
+                    image_url=request.image_url,
+                    recognize_type=request.recognize_type.value,
+                    custom_prompt=request.custom_prompt,
+                ):
+                    # SSE 格式
+                    yield f"data: {chunk}\n\n"
+                
+                yield "data: [DONE]\n\n"
+                
+            except Exception as e:
+                yield f"data: [ERROR] {str(e)}\n\n"
+        
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
         
     except Exception as e:
