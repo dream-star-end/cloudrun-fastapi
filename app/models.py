@@ -25,6 +25,8 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     """AI 对话请求"""
+    model_config = {"protected_namespaces": ()}
+    
     messages: List[ChatMessage] = Field(..., description="对话历史")
     stream: bool = Field(default=True, description="是否使用流式响应")
     model_type: str = Field(default="text", description="模型类型: text/vision/longtext")
