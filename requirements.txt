@@ -6,17 +6,19 @@ python-multipart>=0.0.6
 # HTTP 客户端
 httpx>=0.26.0
 
-# 配置管理（升级 pydantic 以兼容 LangChain）
-pydantic>=2.7.4
-pydantic-settings>=2.2.0
+# 配置管理
+pydantic>=2.5.0,<3.0.0
+pydantic-settings>=2.1.0
 
 # 异步支持
 anyio>=4.2.0
 
-# LangChain 1.0 核心
-langchain>=0.3.0
-langchain-core>=0.3.0
-langchain-openai>=0.2.0
+# LangChain 0.2.x（稳定版本）
+# 注意：必须安装 langchain-community 才能使用 AgentExecutor
+langchain==0.2.16
+langchain-core==0.2.40
+langchain-openai==0.1.25
+langchain-community==0.2.17
 
 # 搜索工具（可选）
 tavily-python>=0.3.0
