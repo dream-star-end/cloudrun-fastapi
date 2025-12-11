@@ -4,6 +4,8 @@
 使用数据库直连
 """
 
+import logging
+import traceback
 from typing import Optional, TYPE_CHECKING
 from langchain_core.tools import tool, BaseTool
 from datetime import datetime, timedelta
@@ -19,6 +21,10 @@ from ...db.wxcloud import (
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
+
+# 配置日志
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 def create_get_learning_stats_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
@@ -36,14 +42,19 @@ def create_get_learning_stats_tool(user_id: str, memory: "AgentMemory") -> BaseT
         Returns:
             学习统计信息
         """
+        logger.info(f"[get_learning_stats] 开始获取学习统计, user_id={user_id}, period={period}")
+        
         try:
+            logger.debug("[get_learning_stats] 创建 Repositories...")
             user_repo = UserRepository()
             checkin_repo = CheckinRepository()
             focus_repo = FocusRepository()
             task_repo = TaskRepository()
             
             # 获取基础统计
+            logger.debug("[get_learning_stats] 获取用户统计数据...")
             stats = await user_repo.get_stats(user_id) or {}
+            logger.debug(f"[get_learning_stats] 用户统计: {stats}")
             checkin_stats = await checkin_repo.get_checkin_stats(user_id)
             focus_stats = await focus_repo.get_today_stats(user_id)
             task_progress = await task_repo.get_task_progress(user_id)
@@ -107,6 +118,8 @@ def create_get_learning_stats_tool(user_id: str, memory: "AgentMemory") -> BaseT
             return result
             
         except Exception as e:
+            logger.error(f"[get_learning_stats] 获取统计失败: {type(e).__name__}: {str(e)}")
+            logger.error(f"[get_learning_stats] 堆栈跟踪:\n{traceback.format_exc()}")
             return f"""📊 学习统计
 
 ⚠️ 获取数据失败

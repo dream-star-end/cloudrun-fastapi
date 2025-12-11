@@ -3,8 +3,12 @@
 支持从环境变量读取敏感配置
 """
 import os
+import logging
 from pydantic_settings import BaseSettings
-from typing import Optional
+
+# 配置日志
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 class Settings(BaseSettings):
@@ -69,6 +73,17 @@ IS_CLOUDRUN = any([
 # 强制禁用 SSL 验证（如果环境检测不准确，可以通过环境变量强制设置）
 DISABLE_SSL_VERIFY = os.environ.get('DISABLE_SSL_VERIFY', 'true').lower() == 'true'
 
+# 启动时打印关键配置信息
+logger.info("=" * 60)
+logger.info("[Config] 应用配置加载完成")
+logger.info(f"[Config] IS_CLOUDRUN: {IS_CLOUDRUN}")
+logger.info(f"[Config] DISABLE_SSL_VERIFY: {DISABLE_SSL_VERIFY}")
+logger.info(f"[Config] TCB_ENV: {settings.TCB_ENV}")
+logger.info(f"[Config] WX_APPID: {settings.WX_APPID[:8]}***" if settings.WX_APPID else "[Config] WX_APPID: 未配置")
+logger.info(f"[Config] WX_SECRET: {settings.WX_SECRET[:8]}***" if settings.WX_SECRET else "[Config] WX_SECRET: 未配置")
+logger.info(f"[Config] DEEPSEEK_API_KEY: {'已配置' if settings.DEEPSEEK_API_KEY else '未配置'}")
+logger.info("=" * 60)
+
 
 def get_http_client_kwargs(timeout: float = 30.0) -> dict:
     """
@@ -85,11 +100,15 @@ def get_http_client_kwargs(timeout: float = 30.0) -> dict:
     # 云托管环境或强制禁用时，不验证 SSL
     verify_ssl = not (IS_CLOUDRUN or DISABLE_SSL_VERIFY)
     
-    return {
+    kwargs = {
         "timeout": timeout,
         "verify": verify_ssl,
         "http2": False,  # 禁用 HTTP/2 提高兼容性
     }
+    
+    logger.debug(f"[Config] HTTP 客户端配置: timeout={timeout}, verify={verify_ssl}, IS_CLOUDRUN={IS_CLOUDRUN}, DISABLE_SSL_VERIFY={DISABLE_SSL_VERIFY}")
+    
+    return kwargs
 
 
 # AI 模型配置字典

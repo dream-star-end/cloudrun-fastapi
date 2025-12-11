@@ -4,6 +4,8 @@
 使用数据库直连
 """
 
+import logging
+import traceback
 from typing import Optional, TYPE_CHECKING
 from langchain_core.tools import tool, BaseTool
 from datetime import datetime
@@ -12,6 +14,10 @@ from ...db.wxcloud import CheckinRepository, UserRepository, get_db
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
+
+# 配置日志
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 def create_checkin_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
@@ -27,9 +33,15 @@ def create_checkin_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
         Returns:
             打卡结果，包含连续天数等信息
         """
+        logger.info(f"[do_checkin] 开始执行打卡, user_id={user_id}")
+        
         try:
+            logger.debug("[do_checkin] 创建 CheckinRepository...")
             repo = CheckinRepository()
+            
+            logger.debug("[do_checkin] 调用 do_checkin...")
             result = await repo.do_checkin(user_id)
+            logger.debug(f"[do_checkin] 打卡结果: {result}")
             
             if result.get("success"):
                 data = result.get("data", {})
@@ -46,6 +58,7 @@ def create_checkin_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
                 else:
                     encourage = "✨ 每一天都是新的开始，加油！"
                 
+                logger.info(f"[do_checkin] 打卡成功, streak={streak}, study_days={study_days}")
                 return f"""✅ 打卡成功！
 
 📅 打卡时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
@@ -55,6 +68,7 @@ def create_checkin_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
 {encourage}"""
             else:
                 error = result.get("error", "打卡失败")
+                logger.warning(f"[do_checkin] 打卡失败: {error}")
                 if "已打卡" in error:
                     return f"""ℹ️ 今日已打卡！
 
@@ -64,6 +78,8 @@ def create_checkin_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
                 return f"❌ 打卡失败：{error}"
                 
         except Exception as e:
+            logger.error(f"[do_checkin] 打卡异常: {type(e).__name__}: {str(e)}")
+            logger.error(f"[do_checkin] 堆栈跟踪:\n{traceback.format_exc()}")
             return f"""⚠️ 打卡服务暂时不可用
 
 请稍后重试，或者直接在小程序中点击打卡按钮。
@@ -85,9 +101,15 @@ def create_get_checkin_status_tool(user_id: str, memory: "AgentMemory") -> BaseT
         Returns:
             打卡统计信息，包含今日状态、连续天数、总天数等
         """
+        logger.info(f"[get_checkin_status] 开始获取打卡状态, user_id={user_id}")
+        
         try:
+            logger.debug("[get_checkin_status] 创建 CheckinRepository...")
             repo = CheckinRepository()
+            
+            logger.debug("[get_checkin_status] 获取打卡统计...")
             stats = await repo.get_checkin_stats(user_id)
+            logger.debug(f"[get_checkin_status] 统计数据: {stats}")
             
             today_status = "✅ 已打卡" if stats.get("todayChecked") else "❌ 未打卡"
             current_streak = stats.get("currentStreak", 0)
@@ -101,6 +123,7 @@ def create_get_checkin_status_tool(user_id: str, memory: "AgentMemory") -> BaseT
             minutes = total_minutes % 60
             time_str = f"{hours}小时{minutes}分钟" if hours > 0 else f"{minutes}分钟"
             
+            logger.info(f"[get_checkin_status] 获取成功, today={stats.get('todayChecked')}, streak={current_streak}")
             return f"""📊 你的打卡统计
 
 📅 今日状态：{today_status}
@@ -113,6 +136,8 @@ def create_get_checkin_status_tool(user_id: str, memory: "AgentMemory") -> BaseT
 {'👏 今天已打卡，继续保持！' if stats.get("todayChecked") else '💡 今天还没打卡，现在就开始学习吧！'}"""
             
         except Exception as e:
+            logger.error(f"[get_checkin_status] 获取打卡状态失败: {type(e).__name__}: {str(e)}")
+            logger.error(f"[get_checkin_status] 堆栈跟踪:\n{traceback.format_exc()}")
             return f"""⚠️ 获取打卡数据失败
 
 请稍后重试，或在小程序「打卡」页面查看。

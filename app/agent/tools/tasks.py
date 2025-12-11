@@ -4,6 +4,8 @@
 使用数据库直连
 """
 
+import logging
+import traceback
 from typing import Optional, List, TYPE_CHECKING
 from langchain_core.tools import tool, BaseTool
 from datetime import datetime
@@ -12,6 +14,10 @@ from ...db.wxcloud import TaskRepository, PlanRepository, get_db
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
+
+# 配置日志
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 def create_get_today_tasks_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
@@ -26,9 +32,15 @@ def create_get_today_tasks_tool(user_id: str, memory: "AgentMemory") -> BaseTool
         Returns:
             今日任务列表及完成状态
         """
+        logger.info(f"[get_today_tasks] 开始获取今日任务, user_id={user_id}")
+        
         try:
+            logger.debug("[get_today_tasks] 创建 TaskRepository...")
             task_repo = TaskRepository()
+            
+            logger.debug("[get_today_tasks] 获取今日任务...")
             tasks = await task_repo.get_today_tasks(user_id)
+            logger.debug(f"[get_today_tasks] 获取到 {len(tasks)} 个任务")
             
             today = datetime.now().strftime('%Y-%m-%d')
             
@@ -87,6 +99,8 @@ def create_get_today_tasks_tool(user_id: str, memory: "AgentMemory") -> BaseTool
             return result
             
         except Exception as e:
+            logger.error(f"[get_today_tasks] 获取任务失败: {type(e).__name__}: {str(e)}")
+            logger.error(f"[get_today_tasks] 堆栈跟踪:\n{traceback.format_exc()}")
             return f"""⚠️ 获取任务失败
 
 请在小程序「学习计划」页面查看任务列表。

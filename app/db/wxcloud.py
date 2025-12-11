@@ -9,10 +9,16 @@
 import os
 import json
 import httpx
+import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from ..config import settings
+
+# 配置日志
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger.setLevel(logging.DEBUG)  # 数据库操作需要详细日志
 
 
 class WxCloudDB:
@@ -52,7 +58,9 @@ class WxCloudDB:
         if self._client is None:
             from ..config import get_http_client_kwargs
             # 使用统一的 HTTP 客户端配置
-            self._client = httpx.AsyncClient(**get_http_client_kwargs(30.0))
+            kwargs = get_http_client_kwargs(30.0)
+            logger.debug(f"[WxCloudDB] 创建 HTTP 客户端, 配置: {kwargs}")
+            self._client = httpx.AsyncClient(**kwargs)
         return self._client
     
     async def _get_access_token(self) -> str:
@@ -64,27 +72,43 @@ class WxCloudDB:
         # 检查缓存的 token
         if self._access_token and self._token_expires:
             if datetime.now() < self._token_expires:
+                logger.debug(f"使用缓存的 access_token，过期时间: {self._token_expires}")
                 return self._access_token
         
         # 获取新 token
+        logger.info("开始获取新的 access_token...")
         client = await self._get_client()
         appid = settings.WX_APPID
         secret = settings.WX_SECRET
         
+        logger.debug(f"WX_APPID: {appid[:8]}*** (长度: {len(appid)})")
+        logger.debug(f"WX_SECRET: {secret[:8]}*** (长度: {len(secret)})")
+        
         if not appid or not secret:
+            logger.error("WX_APPID 或 WX_SECRET 未配置！")
             raise ValueError("需要配置 WX_APPID 和 WX_SECRET 环境变量")
         
         url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}"
-        response = await client.get(url)
-        data = response.json()
+        logger.debug(f"请求 access_token URL: {url[:80]}...")
+        
+        try:
+            response = await client.get(url)
+            logger.debug(f"access_token 响应状态码: {response.status_code}")
+            data = response.json()
+            logger.debug(f"access_token 响应数据: {json.dumps(data, ensure_ascii=False)[:200]}")
+        except Exception as e:
+            logger.error(f"获取 access_token HTTP 请求失败: {type(e).__name__}: {str(e)}")
+            raise
         
         if "access_token" in data:
             self._access_token = data["access_token"]
             # token 有效期2小时，提前5分钟刷新
             from datetime import timedelta
             self._token_expires = datetime.now() + timedelta(seconds=data.get("expires_in", 7200) - 300)
+            logger.info(f"获取 access_token 成功，有效期至: {self._token_expires}")
             return self._access_token
         else:
+            logger.error(f"获取 access_token 失败: {data}")
             raise Exception(f"获取 access_token 失败: {data}")
     
     async def _request(self, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -98,21 +122,44 @@ class WxCloudDB:
         Returns:
             响应数据
         """
-        client = await self._get_client()
+        logger.info(f"[WxCloudDB] 开始执行数据库操作: {action}")
+        logger.debug(f"[WxCloudDB] 环境ID: {self.env_id}, 是否云托管: {self.is_cloudrun}")
+        
+        try:
+            client = await self._get_client()
+        except Exception as e:
+            logger.error(f"[WxCloudDB] 获取 HTTP 客户端失败: {type(e).__name__}: {str(e)}")
+            raise
         
         # 添加环境ID
         data["env"] = self.env_id
         
         # 构建 URL - 无论是否云托管，HTTP API 都需要 access_token
-        token = await self._get_access_token()
-        url = f"{self.base_url}/{action}?access_token={token}"
+        try:
+            token = await self._get_access_token()
+            logger.debug(f"[WxCloudDB] 获取 token 成功: {token[:20]}...")
+        except Exception as e:
+            logger.error(f"[WxCloudDB] 获取 access_token 失败: {type(e).__name__}: {str(e)}")
+            raise
         
-        response = await client.post(url, json=data)
-        result = response.json()
+        url = f"{self.base_url}/{action}?access_token={token}"
+        logger.debug(f"[WxCloudDB] 请求 URL: {url[:100]}...")
+        logger.debug(f"[WxCloudDB] 请求数据: {json.dumps(data, ensure_ascii=False)[:500]}")
+        
+        try:
+            response = await client.post(url, json=data)
+            logger.debug(f"[WxCloudDB] 响应状态码: {response.status_code}")
+            result = response.json()
+            logger.debug(f"[WxCloudDB] 响应数据: {json.dumps(result, ensure_ascii=False)[:500]}")
+        except Exception as e:
+            logger.error(f"[WxCloudDB] HTTP 请求失败: {type(e).__name__}: {str(e)}")
+            raise
         
         if result.get("errcode", 0) != 0:
+            logger.error(f"[WxCloudDB] 数据库操作失败: errcode={result.get('errcode')}, errmsg={result.get('errmsg')}")
             raise Exception(f"数据库操作失败: {result}")
         
+        logger.info(f"[WxCloudDB] 数据库操作成功: {action}")
         return result
     
     # ==================== 查询操作 ====================

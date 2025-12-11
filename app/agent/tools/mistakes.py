@@ -4,6 +4,8 @@
 使用数据库直连
 """
 
+import logging
+import traceback
 from typing import Optional, List, TYPE_CHECKING
 from langchain_core.tools import tool, BaseTool
 from langchain_openai import ChatOpenAI
@@ -14,6 +16,10 @@ from ...db.wxcloud import MistakeRepository, get_db
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
+
+# 配置日志
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 def create_get_mistakes_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
@@ -35,15 +41,22 @@ def create_get_mistakes_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
         Returns:
             错题列表信息
         """
+        logger.info(f"[get_mistakes] 开始获取错题列表, user_id={user_id}, category={category}, status={status}")
+        
         try:
+            logger.debug("[get_mistakes] 创建 MistakeRepository...")
             repo = MistakeRepository()
             
             # 获取统计数据
+            logger.debug("[get_mistakes] 获取错题统计...")
             stats = await repo.get_stats(user_id)
+            logger.debug(f"[get_mistakes] 统计数据: {stats}")
             
             # 获取错题列表
             mastered = True if status == "mastered" else (False if status == "pending" else None)
+            logger.debug(f"[get_mistakes] 获取错题列表, mastered={mastered}...")
             mistakes = await repo.get_mistakes(user_id, category=category, mastered=mastered, limit=10)
+            logger.debug(f"[get_mistakes] 获取到 {len(mistakes)} 条错题")
             
             result = f"""📕 错题本
 
@@ -83,9 +96,14 @@ def create_get_mistakes_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
             result += "  - 说「分析这道题」让我帮你找出问题\n"
             result += "  - 说「生成复习题」帮你巩固知识点"
             
+            logger.info("[get_mistakes] 获取错题列表成功")
             return result
             
         except Exception as e:
+            # 记录详细的错误信息和堆栈
+            logger.error(f"[get_mistakes] 获取错题失败: {type(e).__name__}: {str(e)}")
+            logger.error(f"[get_mistakes] 堆栈跟踪:\n{traceback.format_exc()}")
+            
             return f"""📕 错题本
 
 ⚠️ 获取数据失败，请在小程序中查看。
