@@ -12,8 +12,7 @@ AI Agent 核心模块
 import json
 from typing import AsyncIterator, Optional, Dict, Any, List
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -128,19 +127,17 @@ class LearningAgent:
         
         LangChain 1.0 推荐使用 LangGraph 的 create_react_agent
         这是一个更灵活、可控的 Agent 实现方式
-        """
-        # 选择系统提示词
-        system_prompt = (
-            LEARNING_COACH_PROMPT if self.mode == "coach" 
-            else READING_COMPANION_PROMPT
-        )
         
+        注意：LangGraph 0.2.x+ 中 state_modifier 参数已被移除
+        系统提示现在通过 SystemMessage 在 chat() 和 chat_stream() 中动态添加
+        这样可以支持动态的用户画像和对话摘要注入
+        """
         # 使用 LangGraph 创建 ReAct Agent
         # create_react_agent 返回一个 CompiledGraph
+        # 系统提示通过 _build_system_message() 动态构建并作为 SystemMessage 添加
         self.agent = create_react_agent(
             model=self.llm,
             tools=self.tools,
-            state_modifier=system_prompt,  # 系统提示作为状态修饰符
             checkpointer=self.checkpointer,  # 启用对话状态持久化
         )
     
