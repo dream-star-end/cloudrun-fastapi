@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     COS_BUCKET: str = os.getenv("COS_BUCKET", "")
     COS_REGION: str = "ap-shanghai"
     
+    # 微信小程序配置
+    WX_APPID: str = os.getenv("WX_APPID", "")
+    WX_SECRET: str = os.getenv("WX_SECRET", "")
+    
+    # 微信云开发配置
+    TCB_ENV: str = os.getenv("TCB_ENV", "prod-3gvp927wbf0bbf20")  # 云环境ID
+    
     # 跨域配置
     CORS_ORIGINS: list = ["*"]
     
