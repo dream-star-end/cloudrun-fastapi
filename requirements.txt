@@ -1,25 +1,25 @@
 # FastAPI 框架
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-python-multipart==0.0.6
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.6
 
 # HTTP 客户端
-httpx==0.26.0
+httpx>=0.26.0
 
-# 配置管理
-pydantic==2.5.3
-pydantic-settings==2.1.0
+# 配置管理（升级 pydantic 以兼容 LangChain）
+pydantic>=2.7.4
+pydantic-settings>=2.2.0
 
 # 异步支持
-anyio==4.2.0
+anyio>=4.2.0
 
 # LangChain 1.0 核心
 langchain>=0.3.0
 langchain-core>=0.3.0
 langchain-openai>=0.2.0
 
-# 搜索工具
+# 搜索工具（可选）
 tavily-python>=0.3.0
 
 # 可选：用于生产部署
-gunicorn==21.2.0
+gunicorn>=21.2.0
