@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 
 from app.config import settings
 from app.routers import chat_router, recognize_router, search_router, plan_router
+from app.routers.agent import router as agent_router
 
 
 @asynccontextmanager
@@ -74,6 +75,7 @@ app.include_router(chat_router)
 app.include_router(recognize_router)
 app.include_router(search_router)
 app.include_router(plan_router)
+app.include_router(agent_router)  # AI Agent 路由
 
 
 # ==================== 基础端点 ====================
@@ -103,6 +105,28 @@ async def api_info():
         "name": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "endpoints": {
+            # AI Agent（推荐使用）
+            "agent_chat": {
+                "path": "/api/agent/chat",
+                "methods": ["POST"],
+                "description": "AI Agent 对话（非流式）- 支持工具调用和自主决策",
+            },
+            "agent_chat_stream": {
+                "path": "/api/agent/chat/stream",
+                "methods": ["POST"],
+                "description": "AI Agent 对话（流式）- 实时返回思考过程和回复",
+            },
+            "agent_profile": {
+                "path": "/api/agent/profile/{user_id}",
+                "methods": ["GET"],
+                "description": "获取用户画像 - Agent 根据对话自动更新",
+            },
+            "agent_suggestions": {
+                "path": "/api/agent/suggestions/{user_id}",
+                "methods": ["GET"],
+                "description": "获取个性化建议 - 基于用户画像生成",
+            },
+            # 原有 API（保持兼容）
             "chat": {
                 "path": "/api/chat",
                 "methods": ["POST"],

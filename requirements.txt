@@ -13,5 +13,13 @@ pydantic-settings==2.1.0
 # 异步支持
 anyio==4.2.0
 
+# LangChain 1.0 核心
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+
+# 搜索工具
+tavily-python>=0.3.0
+
 # 可选：用于生产部署
 gunicorn==21.2.0
