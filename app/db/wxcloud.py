@@ -59,13 +59,8 @@ class WxCloudDB:
         """
         获取微信 API access_token
         
-        云托管环境中可以通过内网 API 免 access_token 访问
-        其他环境需要通过 appid 和 secret 获取
+        使用 appid 和 secret 获取 access_token，支持缓存
         """
-        if self.is_cloudrun:
-            # 云托管环境，使用内网访问，从环境变量获取
-            return os.environ.get('WX_API_TOKEN', '')
-        
         # 检查缓存的 token
         if self._access_token and self._token_expires:
             if datetime.now() < self._token_expires:
@@ -77,7 +72,7 @@ class WxCloudDB:
         secret = settings.WX_SECRET
         
         if not appid or not secret:
-            raise ValueError("需要配置 WX_APPID 和 WX_SECRET")
+            raise ValueError("需要配置 WX_APPID 和 WX_SECRET 环境变量")
         
         url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}"
         response = await client.get(url)
@@ -108,14 +103,9 @@ class WxCloudDB:
         # 添加环境ID
         data["env"] = self.env_id
         
-        # 构建 URL
-        if self.is_cloudrun:
-            # 云托管内网访问
-            url = f"{self.base_url}/{action}"
-        else:
-            # 外网访问需要 access_token
-            token = await self._get_access_token()
-            url = f"{self.base_url}/{action}?access_token={token}"
+        # 构建 URL - 无论是否云托管，HTTP API 都需要 access_token
+        token = await self._get_access_token()
+        url = f"{self.base_url}/{action}?access_token={token}"
         
         response = await client.post(url, json=data)
         result = response.json()
