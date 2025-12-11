@@ -5,7 +5,7 @@ AI 服务模块
 import httpx
 import json
 from typing import List, Dict, AsyncGenerator, Optional
-from ..config import AI_MODELS, settings
+from ..config import AI_MODELS, settings, get_http_client_kwargs
 
 
 class AIService:
@@ -55,7 +55,7 @@ class AIService:
         # 构建完整的消息列表
         full_messages = cls._build_messages(messages, user_memory)
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
             response = await client.post(
                 f"{config['base_url']}/chat/completions",
                 headers={
@@ -106,7 +106,7 @@ class AIService:
         # 构建完整的消息列表
         full_messages = cls._build_messages(messages, user_memory)
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
             async with client.stream(
                 "POST",
                 f"{config['base_url']}/chat/completions",
@@ -190,7 +190,7 @@ class AIService:
         config = AI_MODELS["vision"]
         messages = cls._build_vision_messages(image_url, recognize_type, custom_prompt)
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
             response = await client.post(
                 f"{config['base_url']}/chat/completions",
                 headers={
@@ -234,7 +234,7 @@ class AIService:
         config = AI_MODELS["vision"]
         messages = cls._build_vision_messages(image_url, recognize_type, custom_prompt)
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
             async with client.stream(
                 "POST",
                 f"{config['base_url']}/chat/completions",
@@ -326,7 +326,7 @@ class AIService:
             config = AI_MODELS["text"]
             messages = [{"role": "user", "content": prompt}]
         
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
             response = await client.post(
                 f"{config['base_url']}/chat/completions",
                 headers={

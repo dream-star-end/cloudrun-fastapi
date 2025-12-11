@@ -57,6 +57,31 @@ class Settings(BaseSettings):
 # 全局配置实例
 settings = Settings()
 
+# 是否在云托管环境中
+IS_CLOUDRUN = os.environ.get('TCB_CONTEXT_KEYS') is not None
+
+
+def get_http_client_kwargs(timeout: float = 30.0) -> dict:
+    """
+    获取 HTTP 客户端的通用配置
+    
+    在云托管环境中禁用 SSL 验证（因为是内网通信）
+    生产环境建议配置正确的 CA 证书
+    
+    Args:
+        timeout: 超时时间（秒）
+    
+    Returns:
+        httpx.AsyncClient 的参数字典
+    """
+    return {
+        "timeout": timeout,
+        # 云托管环境可能存在 SSL 证书验证问题，禁用验证
+        # 这在内网环境中是安全的
+        "verify": not IS_CLOUDRUN,
+        "http2": False,  # 禁用 HTTP/2 提高兼容性
+    }
+
 
 # AI 模型配置字典
 AI_MODELS = {

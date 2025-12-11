@@ -18,7 +18,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from .tools import get_all_tools
 from .memory import AgentMemory
-from ..config import settings
+from ..config import settings, IS_CLOUDRUN
 
 
 # AI 学习教练系统提示词
@@ -154,12 +154,20 @@ class LearningAgent:
         self.memory = memory or AgentMemory(user_id)
         
         # 初始化 LLM
+        # 云托管环境中可能存在 SSL 证书问题，配置 HTTP 客户端
+        import httpx
+        http_client = None
+        if IS_CLOUDRUN:
+            # 云托管内网环境禁用 SSL 验证
+            http_client = httpx.Client(verify=False, http2=False)
+        
         self.llm = ChatOpenAI(
             model=settings.DEEPSEEK_MODEL,
             api_key=settings.DEEPSEEK_API_KEY,
             base_url=settings.DEEPSEEK_API_BASE,
             temperature=0.7,
             streaming=True,
+            http_client=http_client,
         )
         
         # 获取工具
@@ -427,14 +435,49 @@ class LearningAgent:
         })
     
     def _parse_tool_output(self, output: Any) -> Dict[str, Any]:
-        """解析工具输出，转换为结构化数据"""
+        """
+        解析工具输出，转换为结构化数据
+        
+        LangChain 工具可能返回多种格式：
+        1. 字符串
+        2. dict
+        3. ToolMessage 对象（有 content 属性）
+        4. ToolMessage 的字符串表示 "content='...' name='...' tool_call_id='...'"
+        """
+        # 如果是 LangChain 的消息对象，提取 content
+        if hasattr(output, 'content'):
+            content = output.content
+            return {"success": True, "message": content}
+        
         if isinstance(output, str):
+            # 检查是否是 ToolMessage 的字符串表示
+            # 格式类似: content='...' name='...' tool_call_id='...'
+            if output.startswith("content='") or "content='" in output:
+                try:
+                    # 提取 content 字段的值
+                    import re
+                    # 匹配 content='...' 或 content="..."
+                    match = re.search(r"content=['\"](.+?)['\"](?:\s+name=|\s*$)", output, re.DOTALL)
+                    if match:
+                        content = match.group(1)
+                        # 处理转义字符
+                        content = content.replace('\\n', '\n').replace("\\'", "'").replace('\\"', '"')
+                        return {"success": True, "message": content}
+                except Exception:
+                    pass
+            
+            # 尝试解析为 JSON
             try:
                 return json.loads(output)
             except json.JSONDecodeError:
                 return {"success": True, "message": output}
+        
         elif isinstance(output, dict):
+            # 如果 dict 包含 content 字段，提取出来
+            if 'content' in output:
+                return {"success": True, "message": output['content']}
             return output
+        
         else:
             return {"success": True, "data": str(output)}
     

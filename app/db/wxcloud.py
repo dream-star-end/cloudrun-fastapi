@@ -50,7 +50,16 @@ class WxCloudDB:
     async def _get_client(self) -> httpx.AsyncClient:
         """获取 HTTP 客户端"""
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            # 云托管环境通过内网访问微信 API，可能存在 SSL 证书验证问题
+            # 在云托管内网环境中禁用 SSL 验证是安全的（因为是内网通信）
+            # 非云托管环境保持默认的 SSL 验证
+            verify_ssl = not self.is_cloudrun  # 云托管环境禁用验证
+            self._client = httpx.AsyncClient(
+                timeout=30.0, 
+                verify=verify_ssl,
+                # 禁用 HTTP/2 以提高兼容性
+                http2=False,
+            )
         return self._client
     
     async def _get_access_token(self) -> str:

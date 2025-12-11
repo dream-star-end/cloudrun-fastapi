@@ -4,7 +4,7 @@
 """
 import httpx
 from typing import List, Dict, Optional
-from ..config import settings
+from ..config import settings, get_http_client_kwargs
 
 
 class SearchService:
@@ -30,7 +30,7 @@ class SearchService:
         Returns:
             搜索结果字典
         """
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(**get_http_client_kwargs(30.0)) as client:
             response = await client.post(
                 f"{settings.TAVILY_BASE_URL}/search",
                 json={
