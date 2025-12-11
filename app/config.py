@@ -57,8 +57,17 @@ class Settings(BaseSettings):
 # 全局配置实例
 settings = Settings()
 
-# 是否在云托管环境中
-IS_CLOUDRUN = os.environ.get('TCB_CONTEXT_KEYS') is not None
+# 是否在云托管环境中（多种方式检测）
+IS_CLOUDRUN = any([
+    os.environ.get('TCB_CONTEXT_KEYS'),      # 云托管标准环境变量
+    os.environ.get('TENCENTCLOUD_RUNENV'),   # 腾讯云运行环境
+    os.environ.get('TCB_ENV'),               # 云环境 ID
+    os.environ.get('WX_API_TOKEN'),          # 微信 API Token
+    '/app' in os.getcwd(),                   # Docker 容器中通常在 /app 目录
+])
+
+# 强制禁用 SSL 验证（如果环境检测不准确，可以通过环境变量强制设置）
+DISABLE_SSL_VERIFY = os.environ.get('DISABLE_SSL_VERIFY', 'true').lower() == 'true'
 
 
 def get_http_client_kwargs(timeout: float = 30.0) -> dict:
@@ -66,7 +75,6 @@ def get_http_client_kwargs(timeout: float = 30.0) -> dict:
     获取 HTTP 客户端的通用配置
     
     在云托管环境中禁用 SSL 验证（因为是内网通信）
-    生产环境建议配置正确的 CA 证书
     
     Args:
         timeout: 超时时间（秒）
@@ -74,11 +82,12 @@ def get_http_client_kwargs(timeout: float = 30.0) -> dict:
     Returns:
         httpx.AsyncClient 的参数字典
     """
+    # 云托管环境或强制禁用时，不验证 SSL
+    verify_ssl = not (IS_CLOUDRUN or DISABLE_SSL_VERIFY)
+    
     return {
         "timeout": timeout,
-        # 云托管环境可能存在 SSL 证书验证问题，禁用验证
-        # 这在内网环境中是安全的
-        "verify": not IS_CLOUDRUN,
+        "verify": verify_ssl,
         "http2": False,  # 禁用 HTTP/2 提高兼容性
     }
 

@@ -18,7 +18,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from .tools import get_all_tools
 from .memory import AgentMemory
-from ..config import settings, IS_CLOUDRUN
+from ..config import settings, IS_CLOUDRUN, DISABLE_SSL_VERIFY
 
 
 # AI 学习教练系统提示词
@@ -157,9 +157,9 @@ class LearningAgent:
         # 云托管环境中可能存在 SSL 证书问题，配置 HTTP 客户端
         import httpx
         http_client = None
-        if IS_CLOUDRUN:
-            # 云托管内网环境禁用 SSL 验证
-            http_client = httpx.Client(verify=False, http2=False)
+        if IS_CLOUDRUN or DISABLE_SSL_VERIFY:
+            # 云托管环境或强制禁用 SSL 验证
+            http_client = httpx.Client(verify=False, http2=False, timeout=120.0)
         
         self.llm = ChatOpenAI(
             model=settings.DEEPSEEK_MODEL,
