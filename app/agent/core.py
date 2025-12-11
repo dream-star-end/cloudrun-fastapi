@@ -246,18 +246,24 @@ class LearningAgent:
         self,
         message: str,
         context: Optional[Dict[str, Any]] = None,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[Dict[str, Any]]:
         """
         与 Agent 对话（流式）
         
         使用 LangGraph 的 astream_events API 实现流式输出
+        返回结构化的事件对象，便于前端解析展示
         
         Args:
             message: 用户消息
             context: 额外上下文
             
         Yields:
-            Agent 回复的文本块
+            结构化的事件对象:
+            - type: "text" | "tool_start" | "tool_end" | "tool_error" | "thinking"
+            - content: 文本内容
+            - tool_name: 工具名称（工具事件时）
+            - tool_input: 工具输入参数（tool_start 时）
+            - tool_output: 工具输出结果（tool_end 时）
         """
         # 准备输入
         input_data = self._prepare_input(message, context)
@@ -272,6 +278,7 @@ class LearningAgent:
             messages.insert(0, SystemMessage(content=system_content))
         
         full_response = ""
+        current_tool_calls = {}  # 追踪当前工具调用
         
         # 使用 astream_events 进行流式处理
         async for event in self.agent.astream_events(
@@ -287,16 +294,75 @@ class LearningAgent:
                 if chunk and hasattr(chunk, 'content') and chunk.content:
                     content = chunk.content
                     full_response += content
-                    yield content
+                    yield {"type": "text", "content": content}
             
             # 处理工具调用开始
             elif kind == "on_tool_start":
                 tool_name = event.get("name", "unknown")
-                yield f"\n🔧 正在调用 {tool_name}...\n"
+                tool_input = event.get("data", {}).get("input", {})
+                run_id = event.get("run_id", "")
+                
+                # 获取工具的中文名称和描述
+                tool_info = self._get_tool_display_info(tool_name)
+                
+                current_tool_calls[run_id] = {
+                    "name": tool_name,
+                    "display_name": tool_info["display_name"],
+                    "description": tool_info["description"],
+                    "icon": tool_info["icon"],
+                    "input": tool_input,
+                }
+                
+                yield {
+                    "type": "tool_start",
+                    "tool_name": tool_name,
+                    "display_name": tool_info["display_name"],
+                    "description": tool_info["description"],
+                    "icon": tool_info["icon"],
+                    "tool_input": tool_input,
+                    "run_id": run_id,
+                }
             
             # 处理工具调用结束
             elif kind == "on_tool_end":
-                yield "\n✅ 工具调用完成\n"
+                run_id = event.get("run_id", "")
+                tool_output = event.get("data", {}).get("output", "")
+                
+                tool_call_info = current_tool_calls.get(run_id, {})
+                tool_name = tool_call_info.get("name", "unknown")
+                
+                # 解析工具输出
+                parsed_output = self._parse_tool_output(tool_output)
+                
+                yield {
+                    "type": "tool_end",
+                    "tool_name": tool_name,
+                    "display_name": tool_call_info.get("display_name", tool_name),
+                    "icon": tool_call_info.get("icon", "🔧"),
+                    "tool_output": parsed_output,
+                    "success": parsed_output.get("success", True),
+                    "run_id": run_id,
+                }
+                
+                # 清理已完成的工具调用
+                if run_id in current_tool_calls:
+                    del current_tool_calls[run_id]
+            
+            # 处理工具调用错误
+            elif kind == "on_tool_error":
+                run_id = event.get("run_id", "")
+                error = event.get("data", {}).get("error", "未知错误")
+                
+                tool_call_info = current_tool_calls.get(run_id, {})
+                
+                yield {
+                    "type": "tool_error",
+                    "tool_name": tool_call_info.get("name", "unknown"),
+                    "display_name": tool_call_info.get("display_name", "工具"),
+                    "icon": tool_call_info.get("icon", "🔧"),
+                    "error": str(error),
+                    "run_id": run_id,
+                }
         
         # 保存对话记录
         await self.memory.add_message("user", message)
@@ -304,6 +370,73 @@ class LearningAgent:
         
         # 异步分析并进化
         await self._analyze_and_evolve(message, {"output": full_response})
+    
+    def _get_tool_display_info(self, tool_name: str) -> Dict[str, str]:
+        """获取工具的显示信息（中文名称、描述、图标）"""
+        tool_info_map = {
+            # 学习计划相关
+            "create_learning_plan": {"display_name": "创建学习计划", "description": "为你制定个性化学习计划", "icon": "📋"},
+            "generate_daily_tasks": {"display_name": "生成今日任务", "description": "生成每日学习任务", "icon": "📝"},
+            
+            # 搜索相关
+            "search_resources": {"display_name": "联网搜索", "description": "在网上搜索相关资料", "icon": "🔍"},
+            "search_learning_materials": {"display_name": "搜索学习资料", "description": "搜索学习相关材料", "icon": "📚"},
+            
+            # 图片识别
+            "recognize_image": {"display_name": "图片识别", "description": "识别图片中的内容", "icon": "🖼️"},
+            
+            # 任务管理
+            "get_today_tasks": {"display_name": "获取今日任务", "description": "查看今天的学习任务", "icon": "📋"},
+            "complete_task": {"display_name": "完成任务", "description": "标记任务为已完成", "icon": "✅"},
+            "get_task_progress": {"display_name": "任务进度", "description": "查看任务完成进度", "icon": "📊"},
+            "suggest_task_adjustment": {"display_name": "调整建议", "description": "建议调整任务安排", "icon": "💡"},
+            
+            # 打卡系统
+            "do_checkin": {"display_name": "学习打卡", "description": "执行学习打卡签到", "icon": "✨"},
+            "get_checkin_status": {"display_name": "打卡状态", "description": "查看打卡统计", "icon": "📈"},
+            "get_badges": {"display_name": "成就徽章", "description": "查看获得的徽章", "icon": "🏅"},
+            
+            # 番茄专注
+            "get_focus_stats": {"display_name": "专注统计", "description": "查看专注时间统计", "icon": "🍅"},
+            "suggest_focus_plan": {"display_name": "专注计划", "description": "建议专注计划安排", "icon": "⏱️"},
+            
+            # 错题本
+            "get_mistakes": {"display_name": "错题列表", "description": "查看错题本", "icon": "📕"},
+            "add_mistake": {"display_name": "添加错题", "description": "添加新错题", "icon": "➕"},
+            "analyze_mistake": {"display_name": "错题分析", "description": "AI分析错题原因", "icon": "🔬"},
+            "generate_review_questions": {"display_name": "生成练习题", "description": "生成复习题目", "icon": "📝"},
+            "mark_mistake_mastered": {"display_name": "标记已掌握", "description": "标记错题为已掌握", "icon": "🎯"},
+            
+            # 统计分析
+            "get_learning_stats": {"display_name": "学习统计", "description": "获取学习数据统计", "icon": "📊"},
+            "get_ranking": {"display_name": "排行榜", "description": "查看学习排行榜", "icon": "🏆"},
+            "get_achievement_rate": {"display_name": "达成率", "description": "查看目标达成率", "icon": "🎯"},
+            "analyze_learning_pattern": {"display_name": "学习分析", "description": "分析学习模式", "icon": "📈"},
+            "get_calendar_data": {"display_name": "日历数据", "description": "查看日历学习详情", "icon": "📅"},
+            "analyze_learning_status": {"display_name": "状态分析", "description": "分析整体学习状态", "icon": "💡"},
+            
+            # 用户画像
+            "update_user_profile": {"display_name": "更新画像", "description": "更新用户学习画像", "icon": "👤"},
+            "get_user_stats": {"display_name": "用户统计", "description": "获取用户统计信息", "icon": "📋"},
+        }
+        
+        return tool_info_map.get(tool_name, {
+            "display_name": tool_name,
+            "description": "执行操作",
+            "icon": "🔧"
+        })
+    
+    def _parse_tool_output(self, output: Any) -> Dict[str, Any]:
+        """解析工具输出，转换为结构化数据"""
+        if isinstance(output, str):
+            try:
+                return json.loads(output)
+            except json.JSONDecodeError:
+                return {"success": True, "message": output}
+        elif isinstance(output, dict):
+            return output
+        else:
+            return {"success": True, "data": str(output)}
     
     def _build_system_message(self, input_data: Dict[str, Any]) -> str:
         """构建系统消息内容"""

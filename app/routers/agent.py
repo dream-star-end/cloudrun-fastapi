@@ -90,6 +90,12 @@ async def agent_chat_stream(request: AgentChatRequest):
     与 AI Agent 对话（流式响应 SSE）
     
     实时返回 Agent 的思考过程和回复，包括工具调用通知
+    
+    事件类型：
+    - text: 文本内容流
+    - tool_start: 工具调用开始，包含工具名称、描述、输入参数
+    - tool_end: 工具调用结束，包含执行结果
+    - tool_error: 工具调用出错
     """
     try:
         # 创建 Agent
@@ -102,17 +108,24 @@ async def agent_chat_stream(request: AgentChatRequest):
         
         async def generate():
             try:
-                async for chunk in agent.chat_stream(
+                async for event in agent.chat_stream(
                     message=request.message,
                     context=request.context,
                 ):
-                    # SSE 格式
-                    yield f"data: {json.dumps({'content': chunk})}\n\n"
+                    # 确保中文能正确传输（使用 ensure_ascii=False）
+                    # 然后对非 ASCII 字符进行 Unicode 转义以确保传输安全
+                    event_json = json.dumps(event, ensure_ascii=False)
+                    # 将非 ASCII 字符转为 \uXXXX 格式
+                    safe_json = event_json.encode('unicode_escape').decode('ascii')
+                    yield f"data: {safe_json}\n\n"
                 
                 yield "data: [DONE]\n\n"
                 
             except Exception as e:
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                error_event = {"type": "error", "error": str(e)}
+                error_json = json.dumps(error_event, ensure_ascii=False)
+                safe_json = error_json.encode('unicode_escape').decode('ascii')
+                yield f"data: {safe_json}\n\n"
         
         return StreamingResponse(
             generate(),
