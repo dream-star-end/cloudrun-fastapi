@@ -84,6 +84,19 @@ async def agent_chat(request: AgentChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def json_encode_for_sse(obj) -> str:
+    """
+    将对象编码为 SSE 安全的 JSON 字符串
+    
+    使用 ensure_ascii=True 确保所有 Unicode 字符（包括 emoji）
+    都被正确转义为 JSON 标准的 \\uXXXX 格式
+    
+    对于超出 BMP 的字符（如 emoji），JSON 会自动使用代理对表示
+    例如：📊 -> \\ud83d\\udcca
+    """
+    return json.dumps(obj, ensure_ascii=True)
+
+
 @router.post("/chat/stream")
 async def agent_chat_stream(request: AgentChatRequest):
     """
@@ -112,19 +125,16 @@ async def agent_chat_stream(request: AgentChatRequest):
                     message=request.message,
                     context=request.context,
                 ):
-                    # 确保中文能正确传输（使用 ensure_ascii=False）
-                    # 然后对非 ASCII 字符进行 Unicode 转义以确保传输安全
-                    event_json = json.dumps(event, ensure_ascii=False)
-                    # 将非 ASCII 字符转为 \uXXXX 格式
-                    safe_json = event_json.encode('unicode_escape').decode('ascii')
+                    # 使用 ensure_ascii=True 确保所有 Unicode 都转义为 \uXXXX 格式
+                    # 这是 JSON 标准格式，JavaScript 可以正确解析
+                    safe_json = json_encode_for_sse(event)
                     yield f"data: {safe_json}\n\n"
                 
                 yield "data: [DONE]\n\n"
                 
             except Exception as e:
                 error_event = {"type": "error", "error": str(e)}
-                error_json = json.dumps(error_event, ensure_ascii=False)
-                safe_json = error_json.encode('unicode_escape').decode('ascii')
+                safe_json = json_encode_for_sse(error_event)
                 yield f"data: {safe_json}\n\n"
         
         return StreamingResponse(
