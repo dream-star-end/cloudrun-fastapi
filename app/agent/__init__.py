@@ -1,26 +1,17 @@
 """
 AI Agent 模块
-基于 LangChain 1.0 + LangGraph 的智能代理系统
+基于 LangChain 1.0 的智能代理系统
 
 功能：
 - 智能对话与任务规划
 - 工具调用（学习计划、搜索、识别等）
 - 长期记忆与用户画像
 - 自我进化机制
-
-LangChain 1.0 主要更新：
-- 使用 create_react_agent 替代旧的 Agent API
-- 使用 @tool 装饰器简化工具定义
-- 支持 LangGraph 状态管理
 """
 
 from .core import LearningAgent
-from .memory import AgentMemory, MemoryManager
+from .memory import AgentMemory
 from .tools import get_all_tools
 
-__all__ = [
-    "LearningAgent",
-    "AgentMemory",
-    "MemoryManager",
-    "get_all_tools",
-]
+__all__ = ["LearningAgent", "AgentMemory", "get_all_tools"]
+

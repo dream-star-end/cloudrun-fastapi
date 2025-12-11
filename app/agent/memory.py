@@ -2,8 +2,6 @@
 AI Agent 记忆系统
 实现对话记忆和用户画像的持久化存储
 
-基于 LangChain 1.0 兼容
-
 功能：
 - 短期记忆：当前对话上下文
 - 长期记忆：用户画像、学习历史
@@ -19,14 +17,7 @@ _memory_store: Dict[str, Dict[str, Any]] = {}
 
 
 class AgentMemory:
-    """
-    Agent 记忆管理器
-    
-    LangChain 1.0 兼容的记忆实现
-    - 支持 LangGraph 的状态管理
-    - 支持多轮对话记忆
-    - 支持用户画像进化
-    """
+    """Agent 记忆管理器"""
     
     def __init__(self, user_id: str):
         self.user_id = user_id
@@ -76,11 +67,7 @@ class AgentMemory:
             await self._compress_messages()
     
     def get_chat_history(self, limit: int = 10) -> List[BaseMessage]:
-        """
-        获取最近的对话历史（LangChain 格式）
-        
-        返回 LangChain 1.0 兼容的消息列表
-        """
+        """获取最近的对话历史（LangChain 格式）"""
         messages = self._data["messages"][-limit:]
         result = []
         
@@ -91,18 +78,6 @@ class AgentMemory:
                 result.append(AIMessage(content=msg["content"]))
         
         return result
-    
-    def get_messages_for_langgraph(self) -> List[Dict[str, str]]:
-        """
-        获取 LangGraph 格式的消息历史
-        
-        LangGraph 使用字典格式的消息
-        """
-        messages = self._data["messages"][-10:]
-        return [
-            {"role": msg["role"], "content": msg["content"]}
-            for msg in messages
-        ]
     
     def get_raw_history(self, limit: int = 10) -> List[Dict[str, str]]:
         """获取原始对话历史"""
@@ -297,3 +272,4 @@ class MemoryManager:
             "total_users": total_users,
             "total_messages": total_messages,
         }
+
