@@ -1,19 +1,21 @@
 """
 AI Agent 核心模块
-基于 LangChain 1.0 的智能代理
+基于 LangChain 1.0 + LangGraph 的智能代理
 
 特点：
 - 自主决策：根据用户意图选择合适的工具
 - 多轮对话：保持上下文连贯性
 - 自我反思：评估执行结果并优化策略
+- 流式输出：支持实时响应
 """
 
 import json
 from typing import AsyncIterator, Optional, Dict, Any, List
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.memory import MemorySaver
 
 from .tools import get_all_tools
 from .memory import AgentMemory
@@ -83,7 +85,14 @@ READING_COMPANION_PROMPT = """你是一位智能伴读助手，名叫"小智"。
 
 
 class LearningAgent:
-    """AI 学习教练/伴读 Agent"""
+    """
+    AI 学习教练/伴读 Agent
+    
+    基于 LangChain 1.0 + LangGraph 实现
+    - 使用 create_react_agent 创建 ReAct 风格的智能体
+    - 支持工具调用和多轮对话
+    - 内置记忆管理和用户画像
+    """
     
     def __init__(
         self,
@@ -98,8 +107,8 @@ class LearningAgent:
         # 初始化 LLM
         self.llm = ChatOpenAI(
             model=settings.DEEPSEEK_MODEL,
-            openai_api_key=settings.DEEPSEEK_API_KEY,
-            openai_api_base=settings.DEEPSEEK_API_BASE,
+            api_key=settings.DEEPSEEK_API_KEY,
+            base_url=settings.DEEPSEEK_API_BASE,
             temperature=0.7,
             streaming=True,
         )
@@ -107,36 +116,32 @@ class LearningAgent:
         # 获取工具
         self.tools = get_all_tools(user_id=user_id, memory=self.memory)
         
+        # LangGraph 检查点（用于对话状态持久化）
+        self.checkpointer = MemorySaver()
+        
         # 创建 Agent
         self._create_agent()
     
     def _create_agent(self):
-        """创建 LangChain Agent"""
-        # 选择提示词模板
+        """
+        创建 LangGraph ReAct Agent
+        
+        LangChain 1.0 推荐使用 LangGraph 的 create_react_agent
+        这是一个更灵活、可控的 Agent 实现方式
+        """
+        # 选择系统提示词
         system_prompt = (
             LEARNING_COACH_PROMPT if self.mode == "coach" 
             else READING_COMPANION_PROMPT
         )
         
-        # 构建提示词
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
-        
-        # 创建 Agent
-        agent = create_openai_tools_agent(self.llm, self.tools, prompt)
-        
-        # 创建执行器
-        self.agent_executor = AgentExecutor(
-            agent=agent,
+        # 使用 LangGraph 创建 ReAct Agent
+        # create_react_agent 返回一个 CompiledGraph
+        self.agent = create_react_agent(
+            model=self.llm,
             tools=self.tools,
-            verbose=settings.DEBUG,
-            max_iterations=5,  # 最大工具调用次数
-            handle_parsing_errors=True,
-            return_intermediate_steps=True,
+            state_modifier=system_prompt,  # 系统提示作为状态修饰符
+            checkpointer=self.checkpointer,  # 启用对话状态持久化
         )
     
     async def chat(
@@ -157,17 +162,38 @@ class LearningAgent:
         # 准备输入
         input_data = self._prepare_input(message, context)
         
+        # 配置线程 ID（用于多轮对话）
+        config = {"configurable": {"thread_id": self.user_id}}
+        
+        # 构建消息列表
+        messages = [HumanMessage(content=message)]
+        
+        # 如果有系统提示，添加上下文
+        if input_data.get("user_profile"):
+            system_content = self._build_system_message(input_data)
+            messages.insert(0, SystemMessage(content=system_content))
+        
         # 执行 Agent
-        result = await self.agent_executor.ainvoke(input_data)
+        result = await self.agent.ainvoke(
+            {"messages": messages},
+            config=config,
+        )
+        
+        # 提取最终回复
+        output = ""
+        if result.get("messages"):
+            last_message = result["messages"][-1]
+            if hasattr(last_message, 'content'):
+                output = last_message.content
         
         # 保存对话记录
         await self.memory.add_message("user", message)
-        await self.memory.add_message("assistant", result["output"])
+        await self.memory.add_message("assistant", output)
         
         # 分析并更新用户画像
-        await self._analyze_and_evolve(message, result)
+        await self._analyze_and_evolve(message, {"output": output})
         
-        return result["output"]
+        return output
     
     async def chat_stream(
         self,
@@ -176,6 +202,8 @@ class LearningAgent:
     ) -> AsyncIterator[str]:
         """
         与 Agent 对话（流式）
+        
+        使用 LangGraph 的 astream_events API 实现流式输出
         
         Args:
             message: 用户消息
@@ -187,27 +215,39 @@ class LearningAgent:
         # 准备输入
         input_data = self._prepare_input(message, context)
         
+        # 配置
+        config = {"configurable": {"thread_id": self.user_id}}
+        
+        # 构建消息
+        messages = [HumanMessage(content=message)]
+        if input_data.get("user_profile"):
+            system_content = self._build_system_message(input_data)
+            messages.insert(0, SystemMessage(content=system_content))
+        
         full_response = ""
         
-        # 流式执行
-        async for event in self.agent_executor.astream_events(
-            input_data,
+        # 使用 astream_events 进行流式处理
+        async for event in self.agent.astream_events(
+            {"messages": messages},
+            config=config,
             version="v2",
         ):
             kind = event["event"]
             
             # 处理 LLM 流式输出
             if kind == "on_chat_model_stream":
-                content = event["data"]["chunk"].content
-                if content:
+                chunk = event.get("data", {}).get("chunk")
+                if chunk and hasattr(chunk, 'content') and chunk.content:
+                    content = chunk.content
                     full_response += content
                     yield content
             
-            # 处理工具调用通知
+            # 处理工具调用开始
             elif kind == "on_tool_start":
-                tool_name = event["name"]
+                tool_name = event.get("name", "unknown")
                 yield f"\n🔧 正在调用 {tool_name}...\n"
             
+            # 处理工具调用结束
             elif kind == "on_tool_end":
                 yield "\n✅ 工具调用完成\n"
         
@@ -217,6 +257,20 @@ class LearningAgent:
         
         # 异步分析并进化
         await self._analyze_and_evolve(message, {"output": full_response})
+    
+    def _build_system_message(self, input_data: Dict[str, Any]) -> str:
+        """构建系统消息内容"""
+        template = (
+            LEARNING_COACH_PROMPT if self.mode == "coach"
+            else READING_COMPANION_PROMPT
+        )
+        
+        return template.format(
+            user_profile=input_data.get("user_profile", "新用户"),
+            conversation_summary=input_data.get("conversation_summary", "新对话"),
+            current_time=input_data.get("current_time", ""),
+            reading_context=input_data.get("reading_context", "无"),
+        )
     
     def _prepare_input(
         self,
@@ -356,4 +410,3 @@ class LearningAgent:
             return json.loads(response.content.strip())
         except Exception:
             return ["继续加油学习！", "保持学习节奏", "有问题随时问我"]
-

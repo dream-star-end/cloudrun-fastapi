@@ -1,6 +1,6 @@
 """
 AI Agent 工具系统
-封装小程序中的各种功能为 LangChain Tools
+基于 LangChain 1.0 的工具定义
 
 工具列表：
 - 学习计划工具：创建/修改学习计划
@@ -14,11 +14,23 @@ AI Agent 工具系统
 from typing import List, TYPE_CHECKING
 from langchain_core.tools import BaseTool
 
-from .learning_plan import CreateLearningPlanTool, GenerateDailyTasksTool
-from .search import SearchResourcesTool, SearchLearningMaterialsTool
-from .recognize import RecognizeImageTool
-from .analysis import AnalyzeMistakeTool, AnalyzeLearningStatusTool
-from .user import UpdateUserProfileTool, GetUserStatsTool
+from .learning_plan import (
+    create_learning_plan_tool,
+    generate_daily_tasks_tool,
+)
+from .search import (
+    search_resources_tool,
+    search_learning_materials_tool,
+)
+from .recognize import recognize_image_tool
+from .analysis import (
+    analyze_mistake_tool,
+    create_analyze_learning_status_tool,
+)
+from .user import (
+    create_update_user_profile_tool,
+    create_get_user_stats_tool,
+)
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
@@ -31,6 +43,8 @@ def get_all_tools(
     """
     获取所有可用工具
     
+    LangChain 1.0 使用 @tool 装饰器定义的函数式工具
+    
     Args:
         user_id: 用户ID
         memory: Agent 记忆实例
@@ -40,36 +54,26 @@ def get_all_tools(
     """
     return [
         # 学习计划工具
-        CreateLearningPlanTool(user_id=user_id, memory=memory),
-        GenerateDailyTasksTool(user_id=user_id, memory=memory),
+        create_learning_plan_tool(user_id=user_id, memory=memory),
+        generate_daily_tasks_tool(user_id=user_id, memory=memory),
         
         # 搜索工具
-        SearchResourcesTool(),
-        SearchLearningMaterialsTool(),
+        search_resources_tool(),
+        search_learning_materials_tool(),
         
         # 识别工具
-        RecognizeImageTool(),
+        recognize_image_tool(),
         
         # 分析工具
-        AnalyzeMistakeTool(),
-        AnalyzeLearningStatusTool(user_id=user_id, memory=memory),
+        analyze_mistake_tool(),
+        create_analyze_learning_status_tool(user_id=user_id, memory=memory),
         
         # 用户工具
-        UpdateUserProfileTool(user_id=user_id, memory=memory),
-        GetUserStatsTool(user_id=user_id, memory=memory),
+        create_update_user_profile_tool(user_id=user_id, memory=memory),
+        create_get_user_stats_tool(user_id=user_id, memory=memory),
     ]
 
 
 __all__ = [
     "get_all_tools",
-    "CreateLearningPlanTool",
-    "GenerateDailyTasksTool", 
-    "SearchResourcesTool",
-    "SearchLearningMaterialsTool",
-    "RecognizeImageTool",
-    "AnalyzeMistakeTool",
-    "AnalyzeLearningStatusTool",
-    "UpdateUserProfileTool",
-    "GetUserStatsTool",
 ]
-

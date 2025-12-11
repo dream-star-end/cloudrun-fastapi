@@ -13,12 +13,14 @@ pydantic-settings>=2.1.0
 # 异步支持
 anyio>=4.2.0
 
-# LangChain 0.2.x（稳定版本）
-# 注意：必须安装 langchain-community 才能使用 AgentExecutor
-langchain==0.2.16
-langchain-core==0.2.40
-langchain-openai==0.1.25
-langchain-community==0.2.17
+# LangChain 1.0（最新稳定版本）
+# 核心包
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+
+# LangGraph - 新一代 Agent 框架
+langgraph>=0.2.0
 
 # 搜索工具（可选）
 tavily-python>=0.3.0

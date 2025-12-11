@@ -1,78 +1,62 @@
 """
 用户相关工具
+基于 LangChain 1.0 的 @tool 装饰器
 """
 
-import json
-from typing import Optional, Type, List, TYPE_CHECKING
-from pydantic import BaseModel, Field
-from langchain_core.tools import BaseTool
+from typing import TYPE_CHECKING
+from langchain_core.tools import tool, BaseTool
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
 
 
-class UpdateUserProfileInput(BaseModel):
-    """更新用户画像的输入参数"""
-    learning_goal: str = Field(default="", description="新的学习目标")
-    interest: str = Field(default="", description="新发现的兴趣领域")
-    achievement: str = Field(default="", description="新获得的成就")
-    preference: str = Field(default="", description="用户偏好（如喜欢视频学习）")
-
-
-class UpdateUserProfileTool(BaseTool):
-    """更新用户学习画像"""
+def create_update_user_profile_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
+    """
+    创建更新用户画像工具的工厂函数
+    """
     
-    name: str = "update_user_profile"
-    description: str = """更新用户的学习画像信息。
-    当发现用户有新的学习目标、兴趣、成就或偏好时使用。
-    这有助于提供更个性化的学习建议。"""
-    args_schema: Type[BaseModel] = UpdateUserProfileInput
-    
-    user_id: str = ""
-    memory: Optional["AgentMemory"] = None
-    
-    class Config:
-        arbitrary_types_allowed = True
-    
-    def __init__(self, user_id: str, memory: "AgentMemory", **kwargs):
-        super().__init__(**kwargs)
-        self.user_id = user_id
-        self.memory = memory
-    
-    def _run(self, **kwargs) -> str:
-        import asyncio
-        return asyncio.run(self._arun(**kwargs))
-    
-    async def _arun(
-        self,
+    @tool
+    async def update_user_profile(
         learning_goal: str = "",
         interest: str = "",
         achievement: str = "",
         preference: str = "",
     ) -> str:
-        """更新用户画像"""
+        """更新用户的学习画像信息。
         
-        if not self.memory:
+        当发现用户有新的学习目标、兴趣、成就或偏好时使用。
+        这有助于提供更个性化的学习建议。
+        
+        Args:
+            learning_goal: 新的学习目标
+            interest: 新发现的兴趣领域
+            achievement: 新获得的成就
+            preference: 用户偏好（如喜欢视频学习）
+        
+        Returns:
+            更新结果
+        """
+        if not memory:
             return "无法更新用户画像"
         
         updates = []
         
         if learning_goal:
-            self.memory.add_learning_goal(learning_goal)
+            memory.add_learning_goal(learning_goal)
             updates.append(f"学习目标: {learning_goal}")
         
         if interest:
-            profile = self.memory.get_user_profile()
+            profile = memory.get_user_profile()
             if interest not in profile.get("interests", []):
                 profile["interests"].append(interest)
             updates.append(f"兴趣领域: {interest}")
         
         if achievement:
-            self.memory.add_achievement(achievement)
+            memory.add_achievement(achievement)
             updates.append(f"成就: {achievement}")
         
         if preference:
-            profile = self.memory.get_user_profile()
+            profile = memory.get_user_profile()
             profile["preferences"]["noted"] = preference
             updates.append(f"偏好: {preference}")
         
@@ -80,47 +64,34 @@ class UpdateUserProfileTool(BaseTool):
             return f"✅ 已更新用户画像：\n" + "\n".join(f"- {u}" for u in updates)
         else:
             return "没有需要更新的信息"
+    
+    return update_user_profile
 
 
-class GetUserStatsInput(BaseModel):
-    """获取用户统计的输入参数"""
-    stat_type: str = Field(
-        default="all",
-        description="统计类型：goals(目标)/achievements(成就)/interests(兴趣)/all(全部)"
-    )
-
-
-class GetUserStatsTool(BaseTool):
-    """获取用户学习统计"""
+def create_get_user_stats_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
+    """
+    创建获取用户统计工具的工厂函数
+    """
     
-    name: str = "get_user_stats"
-    description: str = """获取用户的学习统计信息。
-    当用户想了解自己的学习数据、成就、目标进度时使用。
-    可以查看学习目标、已获成就、兴趣领域等信息。"""
-    args_schema: Type[BaseModel] = GetUserStatsInput
-    
-    user_id: str = ""
-    memory: Optional["AgentMemory"] = None
-    
-    class Config:
-        arbitrary_types_allowed = True
-    
-    def __init__(self, user_id: str, memory: "AgentMemory", **kwargs):
-        super().__init__(**kwargs)
-        self.user_id = user_id
-        self.memory = memory
-    
-    def _run(self, stat_type: str = "all") -> str:
-        import asyncio
-        return asyncio.run(self._arun(stat_type))
-    
-    async def _arun(self, stat_type: str = "all") -> str:
-        """获取用户统计"""
+    @tool
+    async def get_user_stats(
+        stat_type: str = "all",
+    ) -> str:
+        """获取用户的学习统计信息。
         
-        if not self.memory:
+        当用户想了解自己的学习数据、成就、目标进度时使用。
+        可以查看学习目标、已获成就、兴趣领域等信息。
+        
+        Args:
+            stat_type: 统计类型 goals/achievements/interests/all，默认all
+        
+        Returns:
+            用户学习统计信息
+        """
+        if not memory:
             return "无法获取用户数据"
         
-        profile = self.memory.get_user_profile()
+        profile = memory.get_user_profile()
         
         output_parts = ["📊 学习统计\n"]
         
@@ -162,4 +133,5 @@ class GetUserStatsTool(BaseTool):
                     output_parts.append(f"   • {domain}: {level}")
         
         return "\n".join(output_parts)
-
+    
+    return get_user_stats

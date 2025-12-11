@@ -1,11 +1,16 @@
 """
 学习计划相关工具
+基于 LangChain 1.0 的 @tool 装饰器
+
+LangChain 1.0 推荐使用函数式工具定义：
+- 更简洁的代码
+- 自动推断参数类型
+- 更好的类型提示支持
 """
 
 import json
-from typing import Optional, Type, TYPE_CHECKING
-from pydantic import BaseModel, Field
-from langchain_core.tools import BaseTool
+from typing import Optional, TYPE_CHECKING
+from langchain_core.tools import tool, BaseTool
 from langchain_openai import ChatOpenAI
 
 from ...config import settings
@@ -14,61 +19,47 @@ if TYPE_CHECKING:
     from ..memory import AgentMemory
 
 
-class CreateLearningPlanInput(BaseModel):
-    """创建学习计划的输入参数"""
-    goal: str = Field(description="学习目标，如'掌握Python基础'")
-    domain: str = Field(description="学习领域，如'编程'、'数学'、'英语'")
-    daily_hours: float = Field(default=2.0, description="每天可用学习时间（小时）")
-    current_level: str = Field(default="beginner", description="当前水平：beginner/intermediate/advanced")
-    deadline: Optional[str] = Field(default=None, description="目标截止日期，格式 YYYY-MM-DD")
-
-
-class CreateLearningPlanTool(BaseTool):
-    """创建个性化学习计划"""
+def create_learning_plan_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
+    """
+    创建学习计划工具的工厂函数
     
-    name: str = "create_learning_plan"
-    description: str = """为用户创建个性化学习计划。
-    当用户想要学习新技能、准备考试、或需要系统性学习某个领域时使用此工具。
-    输入学习目标、领域、每天可用时间等信息，生成分阶段的学习计划。"""
-    args_schema: Type[BaseModel] = CreateLearningPlanInput
+    使用闭包捕获 user_id 和 memory
+    """
     
-    user_id: str = ""
-    memory: Optional["AgentMemory"] = None
-    
-    class Config:
-        arbitrary_types_allowed = True
-    
-    def __init__(self, user_id: str, memory: "AgentMemory", **kwargs):
-        super().__init__(**kwargs)
-        self.user_id = user_id
-        self.memory = memory
-    
-    def _run(self, **kwargs) -> str:
-        """同步执行（不推荐）"""
-        import asyncio
-        return asyncio.run(self._arun(**kwargs))
-    
-    async def _arun(
-        self,
+    @tool
+    async def create_learning_plan(
         goal: str,
         domain: str,
         daily_hours: float = 2.0,
         current_level: str = "beginner",
         deadline: Optional[str] = None,
     ) -> str:
-        """异步生成学习计划"""
+        """为用户创建个性化学习计划。
         
+        当用户想要学习新技能、准备考试、或需要系统性学习某个领域时使用此工具。
+        输入学习目标、领域、每天可用时间等信息，生成分阶段的学习计划。
+        
+        Args:
+            goal: 学习目标，如'掌握Python基础'
+            domain: 学习领域，如'编程'、'数学'、'英语'
+            daily_hours: 每天可用学习时间（小时），默认2.0
+            current_level: 当前水平 beginner/intermediate/advanced，默认beginner
+            deadline: 目标截止日期，格式 YYYY-MM-DD（可选）
+        
+        Returns:
+            包含学习计划的JSON格式字符串
+        """
         llm = ChatOpenAI(
             model=settings.DEEPSEEK_MODEL,
-            openai_api_key=settings.DEEPSEEK_API_KEY,
-            openai_api_base=settings.DEEPSEEK_API_BASE,
+            api_key=settings.DEEPSEEK_API_KEY,
+            base_url=settings.DEEPSEEK_API_BASE,
             temperature=0.7,
         )
         
         # 获取用户画像以个性化计划
         user_profile = ""
-        if self.memory:
-            user_profile = self.memory.get_user_profile_summary()
+        if memory:
+            user_profile = memory.get_user_profile_summary()
         
         prompt = f"""作为学习规划专家，请为用户创建一个详细的学习计划。
 
@@ -126,65 +117,52 @@ class CreateLearningPlanTool(BaseTool):
             plan = json.loads(json_str.strip())
             
             # 记录到用户画像
-            if self.memory:
-                self.memory.add_learning_goal(goal)
+            if memory:
+                memory.add_learning_goal(goal)
             
             return f"✅ 学习计划已创建！\n\n{json.dumps(plan, ensure_ascii=False, indent=2)}"
             
         except json.JSONDecodeError:
             return f"学习计划：\n\n{content}"
+    
+    return create_learning_plan
 
 
-class GenerateDailyTasksInput(BaseModel):
-    """生成每日任务的输入参数"""
-    domain: str = Field(description="学习领域")
-    available_hours: float = Field(default=2.0, description="今天可用的学习时间（小时）")
-    focus_area: Optional[str] = Field(default=None, description="今天想要重点学习的内容")
-
-
-class GenerateDailyTasksTool(BaseTool):
-    """生成每日学习任务"""
+def generate_daily_tasks_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
+    """
+    生成每日任务工具的工厂函数
+    """
     
-    name: str = "generate_daily_tasks"
-    description: str = """生成今天的学习任务清单。
-    根据用户的学习计划、进度和可用时间，生成具体可执行的每日任务。
-    适合在用户询问"今天学什么"、"帮我安排今天的学习"时使用。"""
-    args_schema: Type[BaseModel] = GenerateDailyTasksInput
-    
-    user_id: str = ""
-    memory: Optional["AgentMemory"] = None
-    
-    class Config:
-        arbitrary_types_allowed = True
-    
-    def __init__(self, user_id: str, memory: "AgentMemory", **kwargs):
-        super().__init__(**kwargs)
-        self.user_id = user_id
-        self.memory = memory
-    
-    def _run(self, **kwargs) -> str:
-        import asyncio
-        return asyncio.run(self._arun(**kwargs))
-    
-    async def _arun(
-        self,
+    @tool
+    async def generate_daily_tasks(
         domain: str,
         available_hours: float = 2.0,
         focus_area: Optional[str] = None,
     ) -> str:
-        """异步生成每日任务"""
+        """生成今天的学习任务清单。
         
+        根据用户的学习计划、进度和可用时间，生成具体可执行的每日任务。
+        适合在用户询问"今天学什么"、"帮我安排今天的学习"时使用。
+        
+        Args:
+            domain: 学习领域
+            available_hours: 今天可用的学习时间（小时），默认2.0
+            focus_area: 今天想要重点学习的内容（可选）
+        
+        Returns:
+            今日学习任务列表
+        """
         llm = ChatOpenAI(
             model=settings.DEEPSEEK_MODEL,
-            openai_api_key=settings.DEEPSEEK_API_KEY,
-            openai_api_base=settings.DEEPSEEK_API_BASE,
+            api_key=settings.DEEPSEEK_API_KEY,
+            base_url=settings.DEEPSEEK_API_BASE,
             temperature=0.7,
         )
         
         # 获取用户画像
         user_profile = ""
-        if self.memory:
-            user_profile = self.memory.get_user_profile_summary()
+        if memory:
+            user_profile = memory.get_user_profile_summary()
         
         prompt = f"""作为学习教练，请为用户生成今天的学习任务。
 
@@ -206,4 +184,5 @@ class GenerateDailyTasksTool(BaseTool):
         
         response = await llm.ainvoke([{"role": "user", "content": prompt}])
         return f"📋 今日学习任务：\n\n{response.content}"
-
+    
+    return generate_daily_tasks
