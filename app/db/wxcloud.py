@@ -116,7 +116,7 @@ class WxCloudDB:
         发送数据库请求
         
         Args:
-            action: 操作类型，如 databaseQuery, databaseAdd 等
+            action: 操作类型，如 databasequery, databaseadd 等（全小写）
             data: 请求数据
             
         Returns:
@@ -195,7 +195,7 @@ class WxCloudDB:
         
         query_str += f".skip({skip}).limit({limit}).get()"
         
-        result = await self._request("databaseQuery", {"query": query_str})
+        result = await self._request("databasequery", {"query": query_str})
         
         # 解析返回数据
         data = result.get("data", [])
@@ -219,7 +219,7 @@ class WxCloudDB:
     ) -> Optional[Dict[str, Any]]:
         """根据 ID 获取文档"""
         query_str = f"db.collection('{collection}').doc('{doc_id}').get()"
-        result = await self._request("databaseQuery", {"query": query_str})
+        result = await self._request("databasequery", {"query": query_str})
         
         data = result.get("data", [])
         if data:
@@ -234,7 +234,7 @@ class WxCloudDB:
     ) -> int:
         """统计文档数量"""
         query_str = f"db.collection('{collection}').where({json.dumps(query)}).count()"
-        result = await self._request("databaseQuery", {"query": query_str})
+        result = await self._request("databasequery", {"query": query_str})
         return result.get("total", 0)
     
     # ==================== 写入操作 ====================
@@ -259,7 +259,7 @@ class WxCloudDB:
             data["createdAt"] = {"$date": datetime.now().isoformat()}
         
         query_str = f"db.collection('{collection}').add({{data: {json.dumps(data, ensure_ascii=False)}}})"
-        result = await self._request("databaseAdd", {"query": query_str})
+        result = await self._request("databaseadd", {"query": query_str})
         
         return result.get("id_list", [""])[0]
     
@@ -284,7 +284,7 @@ class WxCloudDB:
         data["updatedAt"] = {"$date": datetime.now().isoformat()}
         
         query_str = f"db.collection('{collection}').where({json.dumps(query)}).update({{data: {json.dumps(data, ensure_ascii=False)}}})"
-        result = await self._request("databaseUpdate", {"query": query_str})
+        result = await self._request("databaseupdate", {"query": query_str})
         
         return result.get("modified", 0)
     
@@ -298,7 +298,7 @@ class WxCloudDB:
         data["updatedAt"] = {"$date": datetime.now().isoformat()}
         
         query_str = f"db.collection('{collection}').doc('{doc_id}').update({{data: {json.dumps(data, ensure_ascii=False)}}})"
-        result = await self._request("databaseUpdate", {"query": query_str})
+        result = await self._request("databaseupdate", {"query": query_str})
         
         return result.get("modified", 0) > 0
     
@@ -318,7 +318,7 @@ class WxCloudDB:
             删除的文档数量
         """
         query_str = f"db.collection('{collection}').where({json.dumps(query)}).remove()"
-        result = await self._request("databaseDelete", {"query": query_str})
+        result = await self._request("databasedelete", {"query": query_str})
         
         return result.get("deleted", 0)
     
@@ -329,7 +329,7 @@ class WxCloudDB:
     ) -> bool:
         """根据 ID 删除文档"""
         query_str = f"db.collection('{collection}').doc('{doc_id}').remove()"
-        result = await self._request("databaseDelete", {"query": query_str})
+        result = await self._request("databasedelete", {"query": query_str})
         
         return result.get("deleted", 0) > 0
     
@@ -357,7 +357,7 @@ class WxCloudDB:
         ])
         
         query_str = f"db.collection('{collection}').aggregate().{pipeline_str}.end()"
-        result = await self._request("databaseAggregate", {"query": query_str})
+        result = await self._request("databaseaggregate", {"query": query_str})
         
         data = result.get("data", [])
         if isinstance(data, list):
