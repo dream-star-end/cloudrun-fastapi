@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     WX_APPID: str = os.getenv("WX_APPID", "")
     WX_SECRET: str = os.getenv("WX_SECRET", "")
     
+    # 云托管环境会注入的 OpenAPI Token（可替代 appid/secret 获取 access_token）
+    # 常见变量名：WX_API_TOKEN / WX_API_TOKEN_EXPIRETIME
+    WX_API_TOKEN: str = os.getenv("WX_API_TOKEN", "")
+    WX_API_TOKEN_EXPIRETIME: str = os.getenv("WX_API_TOKEN_EXPIRETIME", "")
+    
     # 微信云开发配置
     TCB_ENV: str = os.getenv("TCB_ENV", "prod-3gvp927wbf0bbf20")  # 云环境ID
     
@@ -65,8 +70,12 @@ settings = Settings()
 IS_CLOUDRUN = any([
     os.environ.get('TCB_CONTEXT_KEYS'),      # 云托管标准环境变量
     os.environ.get('TENCENTCLOUD_RUNENV'),   # 腾讯云运行环境
-    os.environ.get('TCB_ENV'),               # 云环境 ID
-    os.environ.get('WX_API_TOKEN'),          # 微信 API Token
+    os.environ.get('K_SERVICE'),             # Knative/CloudRun 风格服务名（云托管常见）
+    os.environ.get('K_REVISION'),
+    os.environ.get('PORT'),
+    os.environ.get('TCB_ENV'),               # 云环境 ID（有时不注入）
+    os.environ.get('WX_API_TOKEN'),          # 云托管 OpenAPI Token（更可靠）
+    os.path.exists('/.dockerenv'),           # Docker 环境标识
     '/app' in os.getcwd(),                   # Docker 容器中通常在 /app 目录
 ])
 

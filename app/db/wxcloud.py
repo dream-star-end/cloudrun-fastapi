@@ -11,9 +11,9 @@ import json
 import httpx
 import logging
 from typing import Optional, List, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from ..config import settings
+from ..config import settings, IS_CLOUDRUN
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -37,14 +37,17 @@ class WxCloudDB:
             env_id: 云环境ID，如果不提供则从环境变量获取
         """
         # 云环境ID
-        self.env_id = env_id or os.environ.get('TCB_ENV', 'prod-3gvp927wbf0bbf20')
+        # 优先使用显式传入，其次使用配置，再回退到环境变量
+        self.env_id = (env_id or getattr(settings, "TCB_ENV", "") or os.environ.get("TCB_ENV", "")).strip()
+        if not self.env_id:
+            raise ValueError("未配置云环境ID：请设置环境变量 TCB_ENV 或在 settings.TCB_ENV 中配置")
         
         # 内网访问地址（云托管环境中可用）
         # 格式: https://api.weixin.qq.com/tcb/
         self.base_url = "https://api.weixin.qq.com/tcb"
         
-        # 是否在云托管环境中（有内网访问能力）
-        self.is_cloudrun = os.environ.get('TCB_CONTEXT_KEYS') is not None
+        # 是否在云托管环境中（有内网访问能力）- 使用统一的配置
+        self.is_cloudrun = IS_CLOUDRUN
         
         # HTTP 客户端
         self._client: Optional[httpx.AsyncClient] = None
@@ -63,17 +66,67 @@ class WxCloudDB:
             self._client = httpx.AsyncClient(**kwargs)
         return self._client
     
-    async def _get_access_token(self) -> str:
+    def _parse_token_expiretime(self, raw: str) -> Optional[datetime]:
+        """
+        尝试解析云托管注入的 token 过期时间。
+        兼容几种常见形式：
+        - Unix 时间戳（秒/毫秒）
+        - ISO 时间字符串（尽力解析）
+        """
+        if not raw:
+            return None
+        s = str(raw).strip()
+        if not s:
+            return None
+        # 时间戳（秒/毫秒）
+        if s.isdigit():
+            try:
+                v = int(s)
+                # 10 位左右：秒；13 位左右：毫秒
+                if v > 10_000_000_000:  # ms
+                    return datetime.fromtimestamp(v / 1000.0)
+                return datetime.fromtimestamp(v)
+            except Exception:
+                return None
+        # ISO / RFC3339（尽力）
+        try:
+            # Python 3.11: fromisoformat 支持 "YYYY-MM-DDTHH:MM:SS[.ffffff][+HH:MM]"
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    async def _get_access_token(self, force_refresh: bool = False) -> str:
         """
         获取微信 API access_token
         
         使用 appid 和 secret 获取 access_token，支持缓存
         """
-        # 检查缓存的 token
-        if self._access_token and self._token_expires:
-            if datetime.now() < self._token_expires:
-                logger.debug(f"使用缓存的 access_token，过期时间: {self._token_expires}")
-                return self._access_token
+        # 云托管优先使用平台注入的 OpenAPI Token（避免 appid/secret 配置不一致或额度限制）
+        wx_api_token = getattr(settings, "WX_API_TOKEN", "") or os.environ.get("WX_API_TOKEN", "")
+        if wx_api_token:
+            wx_api_token = wx_api_token.strip()
+            if wx_api_token:
+                # 过期时间可选
+                raw_exp = getattr(settings, "WX_API_TOKEN_EXPIRETIME", "") or os.environ.get("WX_API_TOKEN_EXPIRETIME", "")
+                exp_dt = self._parse_token_expiretime(raw_exp) if raw_exp else None
+                if exp_dt:
+                    # 提前 5 分钟刷新提示（云托管一般会自动滚动更新 token，这里只做日志）
+                    logger.debug(f"使用云托管 WX_API_TOKEN，过期时间: {exp_dt}")
+                else:
+                    logger.debug("使用云托管 WX_API_TOKEN（未提供可解析的过期时间）")
+                self._access_token = wx_api_token
+                # 给一个保守的缓存过期（如果平台没提供）
+                self._token_expires = exp_dt or (datetime.now() + timedelta(minutes=90))
+                return wx_api_token
+
+        if force_refresh:
+            self._access_token = None
+            self._token_expires = None
+
+        # 检查缓存的 token（appid/secret 路径）
+        if self._access_token and self._token_expires and datetime.now() < self._token_expires:
+            logger.debug(f"使用缓存的 access_token，过期时间: {self._token_expires}")
+            return self._access_token
         
         # 获取新 token
         logger.info("开始获取新的 access_token...")
@@ -103,7 +156,6 @@ class WxCloudDB:
         if "access_token" in data:
             self._access_token = data["access_token"]
             # token 有效期2小时，提前5分钟刷新
-            from datetime import timedelta
             self._token_expires = datetime.now() + timedelta(seconds=data.get("expires_in", 7200) - 300)
             logger.info(f"获取 access_token 成功，有效期至: {self._token_expires}")
             return self._access_token
@@ -134,30 +186,79 @@ class WxCloudDB:
         # 添加环境ID
         data["env"] = self.env_id
         
-        # 构建 URL - 无论是否云托管，HTTP API 都需要 access_token
+        async def do_post(token: str) -> Dict[str, Any]:
+            url = f"{self.base_url}/{action}?access_token={token}"
+            logger.debug(f"[WxCloudDB] 请求 URL: {url[:100]}...")
+            logger.debug(f"[WxCloudDB] 请求数据: {json.dumps(data, ensure_ascii=False)[:500]}")
+            response = await client.post(url, json=data)
+            logger.debug(f"[WxCloudDB] 响应状态码: {response.status_code}")
+            result = response.json()
+            logger.debug(f"[WxCloudDB] 响应数据: {json.dumps(result, ensure_ascii=False)[:500]}")
+            return result
+
+        # 统一：获取 token（云托管优先 WX_API_TOKEN；否则走 appid/secret）
         try:
             token = await self._get_access_token()
             logger.debug(f"[WxCloudDB] 获取 token 成功: {token[:20]}...")
         except Exception as e:
             logger.error(f"[WxCloudDB] 获取 access_token 失败: {type(e).__name__}: {str(e)}")
             raise
-        
-        url = f"{self.base_url}/{action}?access_token={token}"
-        logger.debug(f"[WxCloudDB] 请求 URL: {url[:100]}...")
-        logger.debug(f"[WxCloudDB] 请求数据: {json.dumps(data, ensure_ascii=False)[:500]}")
-        
+
+        # 发送请求（支持一次刷新 + 轻量重试）
         try:
-            response = await client.post(url, json=data)
-            logger.debug(f"[WxCloudDB] 响应状态码: {response.status_code}")
-            result = response.json()
-            logger.debug(f"[WxCloudDB] 响应数据: {json.dumps(result, ensure_ascii=False)[:500]}")
+            result = await do_post(token)
         except Exception as e:
             logger.error(f"[WxCloudDB] HTTP 请求失败: {type(e).__name__}: {str(e)}")
-            raise
+            # 网络层异常：短暂抖动时重试一次（强制刷新 token）
+            await self._get_access_token(force_refresh=True)
+            token = await self._get_access_token()
+            result = await do_post(token)
         
-        if result.get("errcode", 0) != 0:
-            logger.error(f"[WxCloudDB] 数据库操作失败: errcode={result.get('errcode')}, errmsg={result.get('errmsg')}")
-            raise Exception(f"数据库操作失败: {result}")
+        errcode = result.get("errcode", 0)
+        if errcode != 0:
+            errcode = result.get('errcode')
+            errmsg = result.get('errmsg', '')
+            logger.error(f"[WxCloudDB] 数据库操作失败: errcode={errcode}, errmsg={errmsg}")
+            
+            # 针对常见错误给出具体提示
+            error_hints = {
+                -1: "系统错误，请检查：1) 云开发 HTTP API 是否开启 2) 数据库集合是否存在 3) 安全规则是否允许访问",
+                40066: "URL 路径错误，API 端点不正确",
+                40097: "请求参数错误，检查查询语句格式",
+                42001: "access_token 已过期，需要重新获取",
+                -601001: "数据库集合不存在，请在云开发控制台创建",
+                -502001: "数据库权限不足，请检查安全规则",
+                -502003: "数据库查询语法错误",
+            }
+            hint = error_hints.get(errcode, "")
+            if hint:
+                logger.error(f"[WxCloudDB] 错误提示: {hint}")
+            
+            # token 相关错误：刷新后重试一次（避免偶发 token 失效/灰度）
+            if errcode in (40001, 42001):
+                logger.warning("[WxCloudDB] 可能为 token 失效，尝试刷新 token 后重试一次...")
+                await self._get_access_token(force_refresh=True)
+                token = await self._get_access_token()
+                retry_result = await do_post(token)
+                if retry_result.get("errcode", 0) == 0:
+                    logger.info("[WxCloudDB] 重试成功")
+                    return retry_result
+                logger.error(f"[WxCloudDB] 重试仍失败: {retry_result}")
+
+            # -1：微信侧常见兜底错误，做一次“刷新 token + 短暂退避”重试，便于应对短暂抖动
+            if errcode == -1:
+                logger.warning("[WxCloudDB] errcode=-1，尝试短暂退避并重试一次（同时刷新 token）...")
+                import asyncio
+                await asyncio.sleep(0.3)
+                await self._get_access_token(force_refresh=True)
+                token = await self._get_access_token()
+                retry_result = await do_post(token)
+                if retry_result.get("errcode", 0) == 0:
+                    logger.info("[WxCloudDB] errcode=-1 重试成功")
+                    return retry_result
+                logger.error(f"[WxCloudDB] errcode=-1 重试仍失败: {retry_result}")
+
+            raise Exception(f"数据库操作失败 (errcode={errcode}): {errmsg}. {hint}")
         
         logger.info(f"[WxCloudDB] 数据库操作成功: {action}")
         return result

@@ -89,6 +89,14 @@ VISION_API_KEY = "your-vision-api-key"
 TAVILY_API_KEY = "your-tavily-api-key"
 ```
 
+此外，如果你需要启用 **Agent 的用户统计/打卡/任务/错题本**（会访问云开发数据库），还需要配置：
+
+- **TCB_ENV**: 云开发环境 ID（必填）
+- **WX_API_TOKEN**: 云托管环境注入的 OpenAPI Token（云托管推荐，若已注入则无需手动设置）
+- **WX_APPID / WX_SECRET**: 本地/非云托管环境用于换取 `access_token`（备用）
+
+推荐在云托管控制台以环境变量方式配置（或参考 `config.example.md`）。
+
 ### 3. 启动服务
 
 ```bash
