@@ -90,6 +90,13 @@ logger.info(f"[Config] DISABLE_SSL_VERIFY: {DISABLE_SSL_VERIFY}")
 logger.info(f"[Config] TCB_ENV: {settings.TCB_ENV}")
 logger.info(f"[Config] WX_APPID: {settings.WX_APPID[:8]}***" if settings.WX_APPID else "[Config] WX_APPID: 未配置")
 logger.info(f"[Config] WX_SECRET: {settings.WX_SECRET[:8]}***" if settings.WX_SECRET else "[Config] WX_SECRET: 未配置")
+if getattr(settings, "WX_API_TOKEN", ""):
+    token = settings.WX_API_TOKEN
+    logger.info(f"[Config] WX_API_TOKEN: {token[:8]}*** (长度: {len(token)})")
+else:
+    logger.info("[Config] WX_API_TOKEN: 未配置/未注入")
+if getattr(settings, "WX_API_TOKEN_EXPIRETIME", ""):
+    logger.info(f"[Config] WX_API_TOKEN_EXPIRETIME: {settings.WX_API_TOKEN_EXPIRETIME}")
 logger.info(f"[Config] DEEPSEEK_API_KEY: {'已配置' if settings.DEEPSEEK_API_KEY else '未配置'}")
 logger.info("=" * 60)
 
