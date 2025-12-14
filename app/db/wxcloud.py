@@ -42,9 +42,12 @@ class WxCloudDB:
         if not self.env_id:
             raise ValueError("未配置云环境ID：请设置环境变量 TCB_ENV 或在 settings.TCB_ENV 中配置")
         
-        # 内网访问地址（云托管环境中可用）
-        # 格式: https://api.weixin.qq.com/tcb/
-        self.base_url = "https://api.weixin.qq.com/tcb"
+        # 访问地址
+        # 云托管开启「开放接口服务」后，容器内云调用建议使用 HTTP（更快，且免鉴权）
+        # 参考文档：
+        # - https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloudrun/src/guide/weixin/open.html
+        # - https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloudrun/src/guide/weixin/token.html
+        self.base_url = "http://api.weixin.qq.com/tcb" if IS_CLOUDRUN else "https://api.weixin.qq.com/tcb"
         
         # 是否在云托管环境中（有内网访问能力）- 使用统一的配置
         self.is_cloudrun = IS_CLOUDRUN
@@ -186,33 +189,52 @@ class WxCloudDB:
         # 添加环境ID
         data["env"] = self.env_id
         
-        async def do_post(token: str) -> Dict[str, Any]:
-            url = f"{self.base_url}/{action}?access_token={token}"
-            logger.debug(f"[WxCloudDB] 请求 URL: {url[:100]}...")
+        async def do_post(url: str) -> Dict[str, Any]:
+            logger.debug(f"[WxCloudDB] 请求 URL: {url[:120]}...")
             logger.debug(f"[WxCloudDB] 请求数据: {json.dumps(data, ensure_ascii=False)[:500]}")
             response = await client.post(url, json=data)
             logger.debug(f"[WxCloudDB] 响应状态码: {response.status_code}")
+            # 如果走了「开放接口服务/云调用」，回包 header 会带 x-openapi-seqid
+            openapi_seqid = response.headers.get("x-openapi-seqid")
+            if openapi_seqid:
+                logger.info(f"[WxCloudDB] 命中开放接口服务(云调用)，x-openapi-seqid={openapi_seqid}")
             result = response.json()
             logger.debug(f"[WxCloudDB] 响应数据: {json.dumps(result, ensure_ascii=False)[:500]}")
             return result
 
-        # 统一：获取 token（云托管优先 WX_API_TOKEN；否则走 appid/secret）
-        try:
-            token = await self._get_access_token()
-            logger.debug(f"[WxCloudDB] 获取 token 成功: {token[:20]}...")
-        except Exception as e:
-            logger.error(f"[WxCloudDB] 获取 access_token 失败: {type(e).__name__}: {str(e)}")
-            raise
+        # 云托管优先走「开放接口服务」：
+        # - 请求 api.weixin.qq.com 的接口时，不携带 access_token/cloudbase_access_token
+        # - 需要在控制台配置「微信令牌权限」白名单
+        use_openapi_service = (os.environ.get("WX_OPENAPI_SERVICE", "true").lower() == "true") and self.is_cloudrun
 
-        # 发送请求（支持一次刷新 + 轻量重试）
-        try:
-            result = await do_post(token)
-        except Exception as e:
-            logger.error(f"[WxCloudDB] HTTP 请求失败: {type(e).__name__}: {str(e)}")
-            # 网络层异常：短暂抖动时重试一次（强制刷新 token）
-            await self._get_access_token(force_refresh=True)
-            token = await self._get_access_token()
-            result = await do_post(token)
+        if use_openapi_service:
+            url = f"{self.base_url}/{action}"
+            try:
+                result = await do_post(url)
+            except Exception as e:
+                logger.error(f"[WxCloudDB] HTTP 请求失败(开放接口服务): {type(e).__name__}: {str(e)}")
+                # 网络层异常：短暂抖动时重试一次
+                result = await do_post(url)
+        else:
+            # 非云托管/或禁用开放接口服务：需要 access_token
+            try:
+                token = await self._get_access_token()
+                logger.debug(f"[WxCloudDB] 获取 token 成功: {token[:20]}...")
+            except Exception as e:
+                logger.error(f"[WxCloudDB] 获取 access_token 失败: {type(e).__name__}: {str(e)}")
+                raise
+
+            url = f"{self.base_url}/{action}?access_token={token}"
+            # 发送请求（支持一次刷新 + 轻量重试）
+            try:
+                result = await do_post(url)
+            except Exception as e:
+                logger.error(f"[WxCloudDB] HTTP 请求失败: {type(e).__name__}: {str(e)}")
+                # 网络层异常：短暂抖动时重试一次（强制刷新 token）
+                await self._get_access_token(force_refresh=True)
+                token = await self._get_access_token()
+                url = f"{self.base_url}/{action}?access_token={token}"
+                result = await do_post(url)
         
         errcode = result.get("errcode", 0)
         if errcode != 0:
@@ -235,11 +257,12 @@ class WxCloudDB:
                 logger.error(f"[WxCloudDB] 错误提示: {hint}")
             
             # token 相关错误：刷新后重试一次（避免偶发 token 失效/灰度）
-            if errcode in (40001, 42001):
+            if (not use_openapi_service) and errcode in (40001, 42001):
                 logger.warning("[WxCloudDB] 可能为 token 失效，尝试刷新 token 后重试一次...")
                 await self._get_access_token(force_refresh=True)
                 token = await self._get_access_token()
-                retry_result = await do_post(token)
+                retry_url = f"{self.base_url}/{action}?access_token={token}"
+                retry_result = await do_post(retry_url)
                 if retry_result.get("errcode", 0) == 0:
                     logger.info("[WxCloudDB] 重试成功")
                     return retry_result
@@ -250,9 +273,13 @@ class WxCloudDB:
                 logger.warning("[WxCloudDB] errcode=-1，尝试短暂退避并重试一次（同时刷新 token）...")
                 import asyncio
                 await asyncio.sleep(0.3)
-                await self._get_access_token(force_refresh=True)
-                token = await self._get_access_token()
-                retry_result = await do_post(token)
+                if not use_openapi_service:
+                    await self._get_access_token(force_refresh=True)
+                    token = await self._get_access_token()
+                    retry_url = f"{self.base_url}/{action}?access_token={token}"
+                else:
+                    retry_url = f"{self.base_url}/{action}"
+                retry_result = await do_post(retry_url)
                 if retry_result.get("errcode", 0) == 0:
                     logger.info("[WxCloudDB] errcode=-1 重试成功")
                     return retry_result
