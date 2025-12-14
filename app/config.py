@@ -53,7 +53,8 @@ class Settings(BaseSettings):
     WX_API_TOKEN_EXPIRETIME: str = os.getenv("WX_API_TOKEN_EXPIRETIME", "")
     
     # 微信云开发配置
-    TCB_ENV: str = os.getenv("TCB_ENV", "prod-3gvp927wbf0bbf20")  # 云环境ID
+    # 不再提供写死默认值，避免“切环境”时误连旧环境导致难排查
+    TCB_ENV: str = os.getenv("TCB_ENV", "")  # 云环境ID（必填）
     
     # 跨域配置
     CORS_ORIGINS: list = ["*"]
