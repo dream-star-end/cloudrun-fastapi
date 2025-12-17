@@ -502,14 +502,26 @@ class WxCloudDB:
 
 
 # 全局数据库实例
-_db_instance: Optional[WxCloudDB] = None
+# 可能是 WxCloudDB（旧：走 api.weixin.qq.com/tcb HTTP API）
+# 也可能是 DbProxy（新：走 cloudrun-nodedb 子服务）
+_db_instance: Optional[object] = None
 
 
-def get_db() -> WxCloudDB:
-    """获取数据库实例（单例）"""
+def get_db():
+    """获取数据库实例（单例）
+
+    优先走 DB_PROXY_URL（Node db 子服务，@cloudbase/node-sdk），否则回退到 WxCloudDB。
+    """
     global _db_instance
     if _db_instance is None:
-        _db_instance = WxCloudDB()
+        db_proxy_url = os.environ.get("DB_PROXY_URL", "").strip()
+        if db_proxy_url:
+            from .db_proxy import DbProxy
+            logger.info(f"[DB] 使用 DbProxy: {db_proxy_url}")
+            _db_instance = DbProxy(db_proxy_url)
+        else:
+            logger.info("[DB] 使用 WxCloudDB（未配置 DB_PROXY_URL）")
+            _db_instance = WxCloudDB()
     return _db_instance
 
 
