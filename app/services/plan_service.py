@@ -103,11 +103,12 @@ class PlanService:
                 tasks = json.loads(json_match.group())
                 return cls._validate_tasks(tasks, daily_hours)
             
+            print("[PlanService] Failed to parse AI response, using default tasks")
             # 如果 AI 生成失败，返回默认任务
             return cls._get_default_tasks(domain, daily_hours)
             
         except Exception as e:
-            print(f"生成任务失败: {e}")
+            print(f"[PlanService] AI generation error: {e}, using default tasks")
             return cls._get_default_tasks(domain, daily_hours)
     
     @classmethod
@@ -240,6 +241,8 @@ class PlanService:
         today_stats: Optional[Dict],
     ) -> str:
         """构建每日任务生成提示词"""
+        print(f"[PlanService] Building task prompt for domain: '{domain}'") # DEBUG LOG
+        
         total_minutes = int(daily_hours * 60)
         
         # 分析学习状态
