@@ -13,7 +13,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.config import settings
-from app.routers import chat_router, recognize_router, search_router, plan_router, tasks_router
+from app.routers.chat import router as chat_router
+from app.routers.recognize import router as recognize_router
+from app.routers.search import router as search_router
+from app.routers.plan import router as plan_router
+from app.routers.tasks import router as tasks_router
 from app.routers.agent import router as agent_router
 
 
@@ -22,7 +26,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # 启动时
     print(f"🚀 {settings.APP_NAME} v{settings.APP_VERSION} 启动中...")
-    print(f"📍 API 文档地址: /docs")
+    print("📍 API 文档地址: /docs")
     yield
     # 关闭时
     print("👋 服务已关闭")
