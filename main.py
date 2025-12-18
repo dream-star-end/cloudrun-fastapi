@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.config import settings
-from app.routers import chat_router, recognize_router, search_router, plan_router
+from app.routers import chat_router, recognize_router, search_router, plan_router, tasks_router
 from app.routers.agent import router as agent_router
 
 
@@ -75,6 +75,7 @@ app.include_router(chat_router)
 app.include_router(recognize_router)
 app.include_router(search_router)
 app.include_router(plan_router)
+app.include_router(tasks_router)
 app.include_router(agent_router)  # AI Agent 路由
 
 
@@ -161,6 +162,11 @@ async def api_info():
                 "path": "/api/plan/generate-tasks",
                 "methods": ["POST"],
                 "description": "生成每日任务",
+            },
+            "ensure_today_tasks": {
+                "path": "/api/tasks/today/ensure",
+                "methods": ["POST"],
+                "description": "确保今日任务存在（如不存在则在云托管侧生成并写入数据库）",
             },
             "analyze_mistake": {
                 "path": "/api/plan/analyze-mistake",

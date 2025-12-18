@@ -635,13 +635,24 @@ class TaskRepository:
         self.db = db or get_db()
     
     async def get_today_tasks(self, openid: str) -> List[Dict[str, Any]]:
-        """获取今日任务"""
-        today = datetime.now().strftime("%Y-%m-%d")
+        """获取今日任务（按北京时间范围查询 Date 类型字段）"""
+        from datetime import timezone, timedelta
+        # 计算北京时间的 [dayStart, dayEnd) 对应的 UTC 时间点
+        now_utc = datetime.now(timezone.utc)
+        beijing_now = now_utc + timedelta(hours=8)
+        beijing_day = beijing_now.date()
+        day_start = datetime(beijing_day.year, beijing_day.month, beijing_day.day, tzinfo=timezone.utc) - timedelta(hours=8)
+        day_end = day_start + timedelta(days=1)
+
         return await self.db.query(
             "plan_tasks",
-            {"openid": openid, "date": today},
+            {
+                "openid": openid,
+                "date": {"$gte": {"$date": day_start.isoformat()}, "$lt": {"$date": day_end.isoformat()}},
+            },
             order_by="order",
-            order_type="asc"
+            order_type="asc",
+            limit=200,
         )
     
     async def complete_task(self, task_id: str, completed: bool = True) -> bool:
