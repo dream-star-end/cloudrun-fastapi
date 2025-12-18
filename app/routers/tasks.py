@@ -177,18 +177,37 @@ async def ensure_today_tasks(request: Request):
         raise HTTPException(status_code=500, detail="学习计划缺少 _id")
 
     today_start, today_end = _beijing_day_range(0)
+    
+    # 计算 dateStr (YYYY-MM-DD) 用于精确匹配，避免 Date 类型和时区问题
+    today_str = (today_start + timedelta(hours=8)).date().isoformat()
 
+    # 1. 尝试通过 dateStr 查询 (新版逻辑)
     existing = await db.query(
         "plan_tasks",
         {
             "openid": openid,
             "planId": plan_id,
-            "date": {"$gte": {"$date": today_start.isoformat()}, "$lt": {"$date": today_end.isoformat()}},
+            "dateStr": today_str,
         },
         limit=200,
         order_by="order",
         order_type="asc",
     )
+    
+    # 2. 如果没找到，尝试通过 date 范围查询 (兼容旧数据)
+    if not existing:
+        existing = await db.query(
+            "plan_tasks",
+            {
+                "openid": openid,
+                "planId": plan_id,
+                "date": {"$gte": {"$date": today_start.isoformat()}, "$lt": {"$date": today_end.isoformat()}},
+            },
+            limit=200,
+            order_by="order",
+            order_type="asc",
+        )
+
     if existing:
         return {"success": True, "hasActivePlan": True, "isNew": False, "tasks": existing}
 
@@ -223,6 +242,7 @@ async def ensure_today_tasks(request: Request):
             "completed": False,
             "order": i,
             "date": {"$date": today_start.isoformat()},
+            "dateStr": today_str,  # 新增字段，用于精确查询
             "createdAt": {"$date": now},
             "generatedBy": "fastapi",
         }

@@ -264,25 +264,32 @@ class PlanService:
             else:
                 today_analysis = "今日完成率较低"
         
-        prompt = f"""你是一位学习规划师，请根据以下信息生成明天的学习任务：
+        phase_name = current_phase.get("name", "") if current_phase else ""
+        phase_goals = current_phase.get("goals", []) if current_phase else []
+        phase_goals_str = ", ".join(phase_goals) if phase_goals else ""
+
+        prompt = f"""你是一位专业的学习规划师，请根据以下信息生成明天的学习任务：
 
 【学习领域】{domain}
 【每日学习时长】{daily_hours}小时（{total_minutes}分钟）
-{"【当前阶段】" + current_phase.get("name", "") if current_phase else ""}
-{"【阶段目标】" + ", ".join(current_phase.get("goals", [])) if current_phase and current_phase.get("goals") else ""}
+{"【当前阶段】" + phase_name if phase_name else ""}
+{"【阶段目标】" + phase_goals_str if phase_goals_str else ""}
 {"【学习状态】" + state_analysis if state_analysis else ""}
 {"【今日表现】" + today_analysis if today_analysis else ""}
 
 【核心要求】
-1. 每个任务必须具体可执行，明确指出：学什么、学多少、怎么学
-2. 避免模糊描述，如"复习知识点"应改为"复习第3章牛顿运动定律，完成课后习题1-10题"
-3. 任务描述包含具体数量指标
-4. 总时长约{total_minutes}分钟
-5. 高强度和轻松任务穿插
+1. ⚠️ **任务内容必须严格围绕【学习领域】和【阶段目标】展开。严禁生成与该领域无关的任务（例如：如果领域不是英语，绝不要生成背单词、练听力等任务）。**
+2. 每个任务必须具体可执行，明确指出：学什么、学多少、怎么学
+3. 避免模糊描述，如"复习知识点"应改为"复习第3章牛顿运动定律，完成课后习题1-10题"
+4. 任务描述包含具体数量指标
+5. 总时长约{total_minutes}分钟
+6. 高强度和轻松任务穿插
 
 【任务描述示例】
 - ❌ 差："复习英语单词"
-- ✅ 好："使用艾宾浩斯记忆法复习Unit3的50个核心词汇，要求能拼写并造句"
+- ✅ 好（英语领域）："使用艾宾浩斯记忆法复习Unit3的50个核心词汇，要求能拼写并造句"
+- ✅ 好（编程领域）："阅读React官方文档关于Hooks的章节，并手写一个useEffect的计数器Demo"
+- ✅ 好（考试领域）："完成《系统架构设计师教程》第4章的课后习题，重点复习软件工程模型部分"
 
 请返回JSON数组格式（只返回JSON）：
 [
@@ -300,8 +307,6 @@ class PlanService:
     @classmethod
     def _validate_tasks(cls, tasks: List[Dict], daily_hours: float) -> List[Dict]:
         """验证和规范化任务"""
-        total_minutes = int(daily_hours * 60)
-        
         validated = []
         for i, task in enumerate(tasks):
             validated.append({
