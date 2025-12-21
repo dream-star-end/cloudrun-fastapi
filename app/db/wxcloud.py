@@ -507,6 +507,84 @@ class WxCloudDB:
 _db_instance: Optional[object] = None
 
 
+class ResilientDB:
+    """
+    数据库访问兜底适配器：
+    - 优先走 DbProxy（Node 子服务，@cloudbase/node-sdk）
+    - 若 DbProxy 出现网络连接/超时等错误，则自动降级到 WxCloudDB（云托管 OpenAPI/内网 HTTP）
+
+    目的：避免 DB 子服务不可达时，整个 FastAPI 直接 500。
+    """
+
+    def __init__(self, primary: object, fallback: Optional["WxCloudDB"] = None):
+        self.primary = primary
+        self.fallback = fallback
+
+    async def close(self):
+        for inst in (self.primary, self.fallback):
+            if inst is None:
+                continue
+            try:
+                close = getattr(inst, "close", None)
+                if close:
+                    r = close()
+                    if hasattr(r, "__await__"):
+                        await r
+            except Exception:
+                # best effort
+                pass
+
+    async def _call_with_fallback(self, method: str, *args, **kwargs):
+        try:
+            fn = getattr(self.primary, method)
+            return await fn(*args, **kwargs)
+        except httpx.RequestError as e:
+            # DbProxy 网络错误（ConnectError/Timeout等） -> fallback
+            if not self.fallback:
+                raise
+            logger.warning(f"[DB] DbProxy 网络错误，已降级到 WxCloudDB: {type(e).__name__}: {e}")
+            fn2 = getattr(self.fallback, method)
+            return await fn2(*args, **kwargs)
+
+    async def query(self, collection: str, query: Dict[str, Any], limit: int = 100, skip: int = 0, order_by: Optional[str] = None, order_type: str = "desc"):
+        return await self._call_with_fallback("query", collection, query, limit=limit, skip=skip, order_by=order_by, order_type=order_type)
+
+    async def get_one(self, collection: str, query: Dict[str, Any]):
+        return await self._call_with_fallback("get_one", collection, query)
+
+    async def get_by_id(self, collection: str, doc_id: str):
+        return await self._call_with_fallback("get_by_id", collection, doc_id)
+
+    async def add(self, collection: str, data: Dict[str, Any]):
+        return await self._call_with_fallback("add", collection, data)
+
+    async def update(self, collection: str, query: Dict[str, Any], data: Dict[str, Any]):
+        return await self._call_with_fallback("update", collection, query, data)
+
+    async def update_by_id(self, collection: str, doc_id: str, data: Dict[str, Any]):
+        return await self._call_with_fallback("update_by_id", collection, doc_id, data)
+
+    async def delete(self, collection: str, query: Dict[str, Any]):
+        return await self._call_with_fallback("delete", collection, query)
+
+    async def delete_by_id(self, collection: str, doc_id: str):
+        return await self._call_with_fallback("delete_by_id", collection, doc_id)
+
+    async def aggregate(self, collection: str, pipeline: List[Dict[str, Any]]):
+        # DbProxy 未必实现 aggregate；直接走 fallback（或 primary 若有）
+        if hasattr(self.primary, "aggregate"):
+            try:
+                fn = getattr(self.primary, "aggregate")
+                return await fn(collection, pipeline)
+            except httpx.RequestError as e:
+                if not self.fallback:
+                    raise
+                logger.warning(f"[DB] DbProxy aggregate 网络错误，已降级到 WxCloudDB: {type(e).__name__}: {e}")
+        if not self.fallback:
+            raise AttributeError("aggregate not supported and no fallback configured")
+        return await self.fallback.aggregate(collection, pipeline)
+
+
 def get_db():
     """获取数据库实例（单例）
 
@@ -517,8 +595,16 @@ def get_db():
         db_proxy_url = os.environ.get("DB_PROXY_URL", "").strip()
         if db_proxy_url:
             from .db_proxy import DbProxy
-            logger.info(f"[DB] 使用 DbProxy: {db_proxy_url}")
-            _db_instance = DbProxy(db_proxy_url)
+            logger.info(f"[DB] 优先使用 DbProxy: {db_proxy_url}")
+            primary = DbProxy(db_proxy_url)
+            fallback: Optional[WxCloudDB] = None
+            try:
+                fallback = WxCloudDB()
+                logger.info("[DB] 已准备 WxCloudDB 作为兜底（DbProxy 不可用时自动降级）")
+            except Exception as e:
+                # 若兜底也无法初始化，仍返回 DbProxy，但要给出明显告警
+                logger.warning(f"[DB] WxCloudDB 初始化失败，无法作为兜底，将仅使用 DbProxy: {type(e).__name__}: {e}")
+            _db_instance = ResilientDB(primary=primary, fallback=fallback)
         else:
             logger.info("[DB] 使用 WxCloudDB（未配置 DB_PROXY_URL）")
             _db_instance = WxCloudDB()

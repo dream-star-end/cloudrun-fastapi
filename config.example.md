@@ -60,6 +60,17 @@ WX_APPID=wxxxxxxxxxxxxxxxxx
 WX_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
+### （可选）DB 子服务代理（cloudrun-nodedb）
+
+> 说明：如果你部署了 `cloudrun-nodedb`（Node.js + `@cloudbase/node-sdk`）作为数据库代理，可配置该项提升稳定性与性能。
+> 若 **未部署** 或 **地址不可达**，建议不要配置；当前 FastAPI 也会在 DbProxy 连接失败时自动降级到 `WxCloudDB`。
+
+```bash
+# Node DB 子服务内网地址（示例，按你的云托管服务名/内网域名调整）
+# cloudrun-nodedb 默认监听端口为 80
+DB_PROXY_URL=http://cloudrun-nodedb
+```
+
 ## 本地开发
 
 1. 创建 `.env` 文件，填入上述配置

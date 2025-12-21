@@ -454,3 +454,100 @@ async def toggle_task(request: Request):
     }
 
 
+@router.post("/scheduler/generate-all")
+async def scheduler_generate_all_tasks(request: Request):
+    """
+    定时任务：为所有活跃计划生成明日任务（替代云函数 dailyTaskScheduler）
+    
+    建议通过云托管的定时任务配置，每天北京时间 0:00 调用此接口
+    或通过外部定时任务（如 cron）调用
+    
+    注意：此接口应设置访问限制，仅允许内部调用
+    """
+    db = get_db()
+    
+    # 获取所有活跃计划
+    plans = await db.query(
+        "study_plans",
+        {"status": "active"},
+        limit=1000,
+    )
+    
+    results = {
+        "total": len(plans),
+        "success": 0,
+        "failed": 0,
+        "errors": [],
+    }
+    
+    tomorrow_start, tomorrow_end = _beijing_day_range(1)
+    tomorrow_str = (tomorrow_start + timedelta(hours=8)).date().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
+    
+    for plan in plans:
+        try:
+            openid = plan.get("openid")
+            plan_id = plan.get("_id") or plan.get("id")
+            
+            if not openid or not plan_id:
+                continue
+            
+            # 检查是否已有明日任务
+            existing = await db.query(
+                "plan_tasks",
+                {"openid": openid, "planId": plan_id, "dateStr": tomorrow_str},
+                limit=1,
+            )
+            
+            if existing:
+                results["success"] += 1
+                continue
+            
+            # 获取当前阶段
+            current_phase = _get_current_phase(plan)
+            
+            # 生成任务
+            domain = plan.get("domainName") or plan.get("domain", "")
+            daily_hours = float(plan.get("dailyHours") or 2)
+            
+            # 获取历史数据
+            learning_history = await _compute_learning_history(openid, plan_id)
+            
+            tasks = await PlanService.generate_daily_tasks(
+                domain=domain,
+                daily_hours=daily_hours,
+                current_phase=current_phase,
+                learning_history=learning_history,
+            )
+            
+            # 保存任务
+            for i, t in enumerate(tasks):
+                doc = {
+                    "planId": plan_id,
+                    "openid": openid,
+                    "phaseId": (current_phase or {}).get("id"),
+                    "title": t.get("title", f"任务{i+1}"),
+                    "description": t.get("description", ""),
+                    "duration": int(t.get("duration", 30)),
+                    "priority": t.get("priority", "medium"),
+                    "type": t.get("type", "learn"),
+                    "completed": False,
+                    "order": i,
+                    "date": {"$date": tomorrow_start.isoformat()},
+                    "dateStr": tomorrow_str,
+                    "createdAt": {"$date": now},
+                    "generatedBy": "scheduler",
+                }
+                await db.add("plan_tasks", doc)
+            
+            results["success"] += 1
+            
+        except Exception as e:
+            results["failed"] += 1
+            results["errors"].append({
+                "planId": plan.get("_id"),
+                "error": str(e),
+            })
+    
+    return {"success": True, "data": results}
+
