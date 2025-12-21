@@ -10,12 +10,14 @@
 - 获取目标达成率
 - 生成明日任务
 """
+import json
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from ..db.wxcloud import get_db, PlanRepository
 from ..models import (
@@ -350,6 +352,88 @@ async def generate_plan(request: GeneratePlanRequest):
     except Exception as e:
         logger.error(f"[plan/generate] 异常: {type(e).__name__}: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"计划生成异常: {str(e)}")
+
+
+@router.post("/generate/stream")
+async def generate_plan_stream(request: GeneratePlanRequest):
+    """
+    AI 生成学习计划（流式响应）
+    
+    返回 Server-Sent Events 格式：
+    - data: {"type": "progress", "message": "..."} - 进度更新
+    - data: {"type": "content", "content": "..."} - AI 原始输出片段
+    - data: {"type": "result", "success": true, "plan": {...}} - 最终结果
+    - data: {"type": "error", "error": "..."} - 错误信息
+    - data: [DONE] - 结束标记
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[plan/generate/stream] 收到请求: goal={request.goal[:50] if request.goal else ''}, domain={request.domain}")
+    
+    async def generate():
+        full_content = ""
+        
+        try:
+            # 发送进度更新
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在分析学习目标...'})}\n\n"
+            
+            # 构建 prompt
+            prompt = PlanService._build_plan_prompt(
+                request.goal,
+                request.domain,
+                request.daily_hours,
+                request.deadline,
+                request.current_level,
+                request.preferences,
+            )
+            
+            messages = [{"role": "user", "content": prompt}]
+            
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在生成学习计划...'})}\n\n"
+            
+            # 流式调用 AI
+            async for chunk in AIService.chat_stream(
+                messages=messages,
+                model_type="text",
+                temperature=0.7,
+                max_tokens=4000,
+            ):
+                full_content += chunk
+                # 发送内容片段
+                yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在解析计划结构...'})}\n\n"
+            
+            # 解析 JSON
+            json_match = re.search(r'\{[\s\S]*\}', full_content)
+            if json_match:
+                try:
+                    plan = json.loads(json_match.group())
+                    logger.info(f"[plan/generate/stream] 计划解析成功, phases数量: {len(plan.get('phases', []))}")
+                    yield f"data: {json.dumps({'type': 'result', 'success': True, 'plan': plan})}\n\n"
+                except json.JSONDecodeError as je:
+                    logger.error(f"[plan/generate/stream] JSON 解析失败: {je}")
+                    yield f"data: {json.dumps({'type': 'error', 'error': f'JSON解析失败: {str(je)}'})}\n\n"
+            else:
+                logger.error("[plan/generate/stream] AI 响应中未找到 JSON")
+                yield f"data: {json.dumps({'type': 'error', 'error': '计划格式错误，未找到有效JSON'})}\n\n"
+                
+        except Exception as e:
+            logger.error(f"[plan/generate/stream] 异常: {type(e).__name__}: {str(e)}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        
+        yield "data: [DONE]\n\n"
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/phase-detail")
