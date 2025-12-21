@@ -705,16 +705,20 @@ async def get_achievement_rate(request: Request):
     completed_tasks = len([t for t in all_tasks if t.get("completed")])
     task_completion_rate = int(round((completed_tasks / total_tasks) * 100)) if total_tasks else 0
 
-    # 计算阶段进度
+    # 计算阶段进度（已完成阶段数 / 总阶段数）
     current_phase = _get_current_phase(plan)
     phases = plan.get("phases") or []
     phase_progress = 0
     if current_phase and phases:
+        # phase_index 表示当前在第几阶段（从1开始），已完成的是 phase_index - 1
         phase_index = current_phase.get("index", 1)
-        phase_progress = int(round((phase_index / len(phases)) * 100))
+        completed_phases = phase_index - 1
+        phase_progress = int(round((completed_phases / len(phases)) * 100))
 
-    # 计算学习活跃度（有任务的天数 / 7）
-    active_days = len(set(t.get("dateStr") or "" for t in all_tasks if t.get("dateStr")))
+    # 计算学习活跃度（有完成任务的天数 / 7）
+    # 只统计有任务被完成的天数，而不是有任务创建的天数
+    completed_tasks = [t for t in all_tasks if t.get("completed")]
+    active_days = len(set(t.get("dateStr") or "" for t in completed_tasks if t.get("dateStr")))
     activity_rate = int(round((active_days / 7) * 100))
 
     # 综合达成率（加权平均）
