@@ -467,6 +467,13 @@ async def generate_phase_detail(request: Request):
         logger.error(f"[phase-detail] 计划不存在: planId={plan_id}")
         raise HTTPException(status_code=404, detail=f"计划不存在: {plan_id}")
     
+    # 兼容旧版数据结构：如果数据被嵌套在 data 字段中，则提取出来
+    # 这是由于之前 nodedb 的 add() 调用使用了错误的 { data: ... } 包装
+    if "data" in plan and isinstance(plan.get("data"), dict) and "openid" not in plan:
+        logger.warning("[phase-detail] 检测到旧版嵌套数据结构，正在提取...")
+        nested_data = plan.get("data")
+        plan = {**nested_data, "_id": plan.get("_id")}
+    
     plan_openid = plan.get("openid")
     logger.info(f"[phase-detail] 计划查询结果: plan_openid={plan_openid[:8] if plan_openid else 'None'}***, plan_keys={list(plan.keys())[:5]}")
     
