@@ -130,7 +130,11 @@ class PlanTask(BaseModel):
     title: str
     description: str = ""
     duration: int = 30  # 分钟
-    date: str  # YYYY-MM-DD
+    # 云开发侧通常用 Date 类型字段（可能以 {"$date": "..."} 形式传输）
+    date: Optional[datetime] = None
+    # 与日历绑定的“自然日”（北京时间）字符串：YYYY-MM-DD
+    dateStr: Optional[str] = None
+    calendarDate: Optional[str] = None
     completed: bool = False
     completedAt: Optional[datetime] = None
     order: int = 0

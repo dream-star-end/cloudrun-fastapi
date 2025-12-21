@@ -69,6 +69,7 @@ class PlanService:
         current_phase: Optional[Dict] = None,
         learning_history: Optional[Dict] = None,
         today_stats: Optional[Dict] = None,
+        learning_context: Optional[Dict] = None,
     ) -> List[Dict]:
         """
         生成每日学习任务
@@ -84,7 +85,7 @@ class PlanService:
             任务列表
         """
         prompt = cls._build_task_prompt(
-            domain, daily_hours, current_phase, learning_history, today_stats
+            domain, daily_hours, current_phase, learning_history, today_stats, learning_context
         )
         
         messages = [{"role": "user", "content": prompt}]
@@ -109,6 +110,159 @@ class PlanService:
         except Exception as e:
             print(f"生成任务失败: {e}")
             return cls._get_default_tasks(domain, daily_hours)
+
+    @classmethod
+    def generate_daily_tasks_fast(
+        cls,
+        domain: str,
+        daily_hours: float,
+        current_phase: Optional[Dict] = None,
+        learning_history: Optional[Dict] = None,
+        today_stats: Optional[Dict] = None,
+        learning_context: Optional[Dict] = None,
+    ) -> List[Dict]:
+        """
+        快速生成每日任务（无 AI、毫秒级），用于提升用户感知：
+        - 任务围绕学习领域/阶段目标/已学进度（最近完成率、昨日未完成、错题待复习）生成
+        - 返回结构与 AI 版一致
+        """
+        total_minutes = max(20, int(float(daily_hours) * 60))
+        learning_context = learning_context or {}
+
+        # 基于时长决定任务数
+        if total_minutes <= 60:
+            task_count = 3
+        elif total_minutes <= 120:
+            task_count = 4
+        elif total_minutes <= 180:
+            task_count = 5
+        else:
+            task_count = 6
+
+        # 基于完成率调节任务量
+        completion_rate = 0
+        if learning_history and isinstance(learning_history, dict):
+            completion_rate = int(learning_history.get("avgCompletionRate") or 0)
+        if today_stats and isinstance(today_stats, dict):
+            # 昨日统计/今日统计都可能传进来，取更低的作为保守参考
+            completion_rate = min(completion_rate or 100, int(today_stats.get("completionRate") or 0))
+        if completion_rate and completion_rate < 50 and task_count > 3:
+            task_count -= 1
+
+        # 抽取阶段信息
+        phase_name = (current_phase or {}).get("name") or ""
+        phase_goals = (current_phase or {}).get("goals") or (current_phase or {}).get("objectives") or []
+        key_points = (
+            (current_phase or {}).get("keyPoints")
+            or (current_phase or {}).get("key_points")
+            or (current_phase or {}).get("key_tasks")
+            or []
+        )
+        if isinstance(phase_goals, str):
+            phase_goals = [phase_goals]
+        if isinstance(key_points, str):
+            key_points = [key_points]
+
+        # 最近未完成任务（用于“续做”）
+        carry = learning_context.get("carryover") or {}
+        carry_titles = carry.get("uncompletedTitles") or []
+        if isinstance(carry_titles, str):
+            carry_titles = [carry_titles]
+        carry_titles = [t for t in carry_titles if t][:3]
+
+        # 错题待复习
+        mistakes = learning_context.get("mistakes") or []
+        mistake_titles = []
+        for m in mistakes[:3]:
+            if isinstance(m, dict):
+                title = m.get("topic") or m.get("question") or m.get("title") or ""
+                if title:
+                    mistake_titles.append(str(title)[:30])
+
+        # 选 2-3 个本阶段主题
+        topics = []
+        for x in (key_points or []) + (phase_goals or []):
+            s = str(x).strip()
+            if s and s not in topics:
+                topics.append(s)
+        topics = topics[: max(1, min(3, task_count - 1))]
+        if not topics:
+            topics = [domain or "核心内容"]
+
+        # 分配时长比例
+        ratios = [0.15, 0.35, 0.35, 0.15] if task_count <= 4 else [0.12, 0.28, 0.28, 0.2, 0.12]
+        ratios = ratios[:task_count]
+        total_ratio = sum(ratios) or 1.0
+        durations = [max(10, int(total_minutes * r / total_ratio)) for r in ratios]
+        # 纠偏：总和可能不等于 total_minutes
+        diff = total_minutes - sum(durations)
+        if durations:
+            durations[0] = max(10, durations[0] + diff)
+
+        tasks: List[Dict] = []
+
+        # 1) 续做/复盘优先
+        if carry_titles:
+            tasks.append(
+                {
+                    "title": "✅ 续做昨日未完成",
+                    "description": f"优先完成昨日未完成任务：{'; '.join(carry_titles)}。完成后在任务里勾选并补充一句总结。",
+                    "duration": durations[len(tasks)] if len(tasks) < len(durations) else 25,
+                    "priority": "high",
+                    "type": "review",
+                }
+            )
+        elif mistake_titles:
+            tasks.append(
+                {
+                    "title": "🔁 错题复盘",
+                    "description": f"复盘近期错题：{'; '.join(mistake_titles)}。每题写出错误原因 + 正确解法 + 1条避免再错的规则。",
+                    "duration": durations[len(tasks)] if len(tasks) < len(durations) else 25,
+                    "priority": "high",
+                    "type": "review",
+                }
+            )
+
+        # 2) 学习 + 练习围绕阶段主题
+        topic_idx = 0
+        while len(tasks) < max(1, task_count - 1):
+            topic = topics[topic_idx % len(topics)]
+            topic_idx += 1
+            is_learn = (len(tasks) % 2 == 0)
+            if is_learn:
+                tasks.append(
+                    {
+                        "title": f"📖 学习：{topic}",
+                        "description": f"围绕「{topic}」学习并做笔记（至少3条要点+1个例子）。如有资料，优先按阶段资源/官方文档。",
+                        "duration": durations[len(tasks)] if len(tasks) < len(durations) else 30,
+                        "priority": "high",
+                        "type": "learn",
+                    }
+                )
+            else:
+                tasks.append(
+                    {
+                        "title": f"✍️ 练习：{topic}",
+                        "description": f"围绕「{topic}」做针对性练习：完成3-5个小题/1个小练习，并把错因记录到错题本。",
+                        "duration": durations[len(tasks)] if len(tasks) < len(durations) else 30,
+                        "priority": "high",
+                        "type": "practice",
+                    }
+                )
+
+        # 3) 总结收尾
+        tasks.append(
+            {
+                "title": "📝 今日总结",
+                "description": f"用5分钟总结今天学到的3点（{phase_name+'：' if phase_name else ''}{', '.join(topics[:2])}），并列出明天要继续的1件事。",
+                "duration": durations[len(tasks)] if len(tasks) < len(durations) else 15,
+                "priority": "medium",
+                "type": "review",
+            }
+        )
+
+        tasks = tasks[:task_count]
+        return cls._validate_tasks(tasks, daily_hours)
     
     @classmethod
     async def generate_phase_detail(
@@ -238,6 +392,7 @@ class PlanService:
         current_phase: Optional[Dict],
         learning_history: Optional[Dict],
         today_stats: Optional[Dict],
+        learning_context: Optional[Dict],
     ) -> str:
         """构建每日任务生成提示词"""
         total_minutes = int(daily_hours * 60)
@@ -268,7 +423,24 @@ class PlanService:
         phase_goals = current_phase.get("goals", []) if current_phase else []
         phase_goals_str = ", ".join(phase_goals) if phase_goals else ""
 
-        prompt = f"""你是一位专业的学习规划师，请根据以下信息生成明天的学习任务：
+        # 结合“已学内容/进度”：最近未完成、错题待复盘等
+        context_str = ""
+        if learning_context and isinstance(learning_context, dict):
+            carry = learning_context.get("carryover") or {}
+            uncompleted = carry.get("uncompletedTitles") or []
+            if isinstance(uncompleted, list) and uncompleted:
+                context_str += "【昨日未完成】" + "；".join([str(x)[:40] for x in uncompleted[:3]]) + "\n"
+            mistakes = learning_context.get("mistakes") or []
+            if isinstance(mistakes, list) and mistakes:
+                ms = []
+                for m in mistakes[:3]:
+                    if isinstance(m, dict):
+                        ms.append(str(m.get("topic") or m.get("question") or "")[:40])
+                ms = [x for x in ms if x]
+                if ms:
+                    context_str += "【待复盘错题】" + "；".join(ms) + "\n"
+
+        prompt = f"""你是一位专业的学习规划师，请根据以下信息生成【今天】的学习任务（与日历日期绑定）：
 
 【学习领域】{domain}
 【每日学习时长】{daily_hours}小时（{total_minutes}分钟）
@@ -276,6 +448,7 @@ class PlanService:
 {"【阶段目标】" + phase_goals_str if phase_goals_str else ""}
 {"【学习状态】" + state_analysis if state_analysis else ""}
 {"【今日表现】" + today_analysis if today_analysis else ""}
+{context_str if context_str else ""}
 
 【核心要求】
 1. ⚠️ **任务内容必须严格围绕【学习领域】和【阶段目标】展开。严禁生成与该领域无关的任务（例如：如果领域不是英语，绝不要生成背单词、练听力等任务）。**

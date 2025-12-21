@@ -1,7 +1,8 @@
 """
 学习计划 API 路由
 """
-from fastapi import APIRouter, HTTPException
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, HTTPException, Request
 from ..models import (
     GeneratePlanRequest, GeneratePlanResponse,
     GenerateTasksRequest, GenerateTasksResponse,
@@ -9,8 +10,25 @@ from ..models import (
 )
 from ..services.plan_service import PlanService
 from ..services.ai_service import AIService
+from ..db.wxcloud import get_db, PlanRepository
 
 router = APIRouter(prefix="/api/plan", tags=["学习计划"])
+
+
+def _get_openid_from_request(request: Request) -> str:
+    openid = request.headers.get("x-wx-openid") or request.headers.get("X-WX-OPENID")
+    if not openid:
+        raise HTTPException(status_code=401, detail="缺少用户身份（X-WX-OPENID），请使用 wx.cloud.callContainer 内网调用")
+    return openid
+
+
+def _beijing_day_range(days_offset: int = 0):
+    now_utc = datetime.now(timezone.utc)
+    beijing_now = now_utc + timedelta(hours=8)
+    beijing_day = (beijing_now.date() + timedelta(days=days_offset))
+    day_start_utc = datetime(beijing_day.year, beijing_day.month, beijing_day.day, tzinfo=timezone.utc) - timedelta(hours=8)
+    day_end_utc = day_start_utc + timedelta(days=1)
+    return day_start_utc, day_end_utc
 
 
 @router.post("/generate", response_model=GeneratePlanResponse)
@@ -44,6 +62,45 @@ async def generate_plan(request: GeneratePlanRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/active")
+async def get_active_plan(request: Request):
+    """
+    获取当前活跃计划 + 今日任务（用于替代云函数 getPlan，减少中间链条）
+    """
+    openid = _get_openid_from_request(request)
+    db = get_db()
+    plan_repo = PlanRepository(db)
+
+    plan = await plan_repo.get_active_plan(openid)
+    if not plan:
+        return {"success": True, "hasActivePlan": False, "plan": None, "todayTasks": []}
+
+    plan_id = plan.get("_id") or plan.get("id")
+    if not plan_id:
+        raise HTTPException(status_code=500, detail="学习计划缺少 _id")
+
+    today_start, today_end = _beijing_day_range(0)
+    today_str = (today_start + timedelta(hours=8)).date().isoformat()
+
+    tasks = await db.query(
+        "plan_tasks",
+        {"openid": openid, "planId": plan_id, "dateStr": today_str},
+        limit=200,
+        order_by="order",
+        order_type="asc",
+    )
+    if not tasks:
+        tasks = await db.query(
+            "plan_tasks",
+            {"openid": openid, "planId": plan_id, "date": {"$gte": {"$date": today_start.isoformat()}, "$lt": {"$date": today_end.isoformat()}}},
+            limit=200,
+            order_by="order",
+            order_type="asc",
+        )
+
+    return {"success": True, "hasActivePlan": True, "plan": plan, "todayTasks": tasks, "dateStr": today_str}
 
 
 @router.post("/generate-tasks", response_model=GenerateTasksResponse)
