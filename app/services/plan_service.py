@@ -99,7 +99,7 @@ class PlanService:
         learning_context: Optional[Dict] = None,
     ) -> List[Dict]:
         """
-        生成每日学习任务
+        生成每日学习任务（非流式）
         
         Args:
             domain: 学习领域
@@ -137,6 +137,36 @@ class PlanService:
         except Exception as e:
             print(f"生成任务失败: {e}")
             return cls._get_default_tasks(domain, daily_hours)
+    
+    @classmethod
+    async def generate_daily_tasks_stream(
+        cls,
+        domain: str,
+        daily_hours: float,
+        current_phase: Optional[Dict] = None,
+        learning_history: Optional[Dict] = None,
+        today_stats: Optional[Dict] = None,
+        learning_context: Optional[Dict] = None,
+    ):
+        """
+        生成每日学习任务（流式）
+        
+        Yields:
+            AI 响应内容片段
+        """
+        prompt = cls._build_task_prompt(
+            domain, daily_hours, current_phase, learning_history, today_stats, learning_context
+        )
+        
+        messages = [{"role": "user", "content": prompt}]
+        
+        async for chunk in AIService.chat_stream(
+            messages=messages,
+            model_type="text",
+            temperature=0.7,
+            max_tokens=2000,
+        ):
+            yield chunk
 
     @classmethod
     def generate_daily_tasks_fast(
@@ -292,26 +322,15 @@ class PlanService:
         return cls._validate_tasks(tasks, daily_hours)
     
     @classmethod
-    async def generate_phase_detail(
+    def _build_phase_detail_prompt(
         cls,
         phase_name: str,
         phase_goals: List[str],
         domain: str,
         duration: str,
-    ) -> Dict:
-        """
-        生成学习阶段的详细内容
-        
-        Args:
-            phase_name: 阶段名称
-            phase_goals: 阶段目标
-            domain: 学习领域
-            duration: 阶段时长
-        
-        Returns:
-            阶段详情字典
-        """
-        prompt = f"""请为以下学习阶段生成详细的学习内容和计划：
+    ) -> str:
+        """构建阶段详情生成提示词"""
+        return f"""请为以下学习阶段生成详细的学习内容和计划：
 
 【阶段名称】{phase_name}
 【学习领域】{domain}
@@ -332,6 +351,27 @@ class PlanService:
     "tips": ["学习小贴士1", "小贴士2"]
 }}"""
 
+    @classmethod
+    async def generate_phase_detail(
+        cls,
+        phase_name: str,
+        phase_goals: List[str],
+        domain: str,
+        duration: str,
+    ) -> Dict:
+        """
+        生成学习阶段的详细内容（非流式）
+        
+        Args:
+            phase_name: 阶段名称
+            phase_goals: 阶段目标
+            domain: 学习领域
+            duration: 阶段时长
+        
+        Returns:
+            阶段详情字典
+        """
+        prompt = cls._build_phase_detail_prompt(phase_name, phase_goals, domain, duration)
         messages = [{"role": "user", "content": prompt}]
         
         try:
@@ -350,6 +390,32 @@ class PlanService:
             
         except Exception as e:
             return {"success": False, "error": str(e)}
+    
+    @classmethod
+    async def generate_phase_detail_stream(
+        cls,
+        phase_name: str,
+        phase_goals: List[str],
+        domain: str,
+        duration: str,
+    ):
+        """
+        生成学习阶段的详细内容（流式）
+        
+        Yields:
+            AI 响应内容片段
+        """
+        from typing import AsyncGenerator
+        prompt = cls._build_phase_detail_prompt(phase_name, phase_goals, domain, duration)
+        messages = [{"role": "user", "content": prompt}]
+        
+        async for chunk in AIService.chat_stream(
+            messages=messages,
+            model_type="text",
+            temperature=0.7,
+            max_tokens=2000,
+        ):
+            yield chunk
     
     @classmethod
     def _build_plan_prompt(

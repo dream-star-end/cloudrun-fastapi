@@ -529,6 +529,131 @@ async def generate_phase_detail(request: Request):
     return {"success": True, "data": {"phaseDetail": updated_phase}}
 
 
+@router.post("/phase-detail/stream")
+async def generate_phase_detail_stream(request: Request):
+    """
+    生成学习阶段详情（流式响应）
+    
+    返回 Server-Sent Events 格式：
+    - data: {"type": "progress", "message": "..."} - 进度更新
+    - data: {"type": "content", "content": "..."} - AI 原始输出片段
+    - data: {"type": "result", "success": true, "phaseDetail": {...}} - 最终结果
+    - data: {"type": "error", "error": "..."} - 错误信息
+    - data: [DONE] - 结束标记
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    openid = _get_openid_from_request(request)
+    db = get_db()
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="请求体格式错误")
+
+    plan_id = body.get("planId") or body.get("plan_id")
+    phase_id = body.get("phaseId") or body.get("phase_id")
+
+    if not plan_id or not phase_id:
+        raise HTTPException(status_code=400, detail="缺少 planId 或 phaseId")
+
+    # 获取计划
+    plan = await db.get_by_id("study_plans", plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="计划不存在")
+    
+    # 兼容旧版嵌套数据结构
+    if "data" in plan and isinstance(plan.get("data"), dict) and "openid" not in plan:
+        nested_data = plan.get("data")
+        plan = {**nested_data, "_id": plan.get("_id")}
+    
+    if plan.get("openid") != openid:
+        raise HTTPException(status_code=403, detail="无权访问该计划")
+
+    # 找到对应阶段
+    phases = plan.get("phases") or []
+    phase = None
+    phase_index = -1
+    for i, p in enumerate(phases):
+        if p.get("id") == phase_id:
+            phase = p
+            phase_index = i
+            break
+
+    if not phase:
+        raise HTTPException(status_code=404, detail="阶段不存在")
+
+    async def generate():
+        full_content = ""
+        
+        try:
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在分析阶段目标...'})}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在生成阶段详情...'})}\n\n"
+            
+            # 流式调用 AI
+            async for chunk in PlanService.generate_phase_detail_stream(
+                phase_name=phase.get("name", ""),
+                phase_goals=phase.get("goals", []),
+                domain=plan.get("domainName") or plan.get("domain", ""),
+                duration=phase.get("duration", "1周"),
+            ):
+                full_content += chunk
+                yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在解析阶段详情...'})}\n\n"
+            
+            # 解析 JSON
+            json_match = re.search(r'\{[\s\S]*\}', full_content)
+            if json_match:
+                try:
+                    detail = json.loads(json_match.group())
+                    
+                    # 更新阶段信息
+                    updated_phase = {
+                        **phase,
+                        "status": "completed",
+                        "keyPoints": detail.get("key_points", []),
+                        "resources": [
+                            {"name": r.get("name", ""), "type": r.get("type", "")}
+                            for r in detail.get("learning_resources", [])
+                        ],
+                        "milestone": (
+                            detail.get("milestones", [{}])[0].get("goal", "") if detail.get("milestones") else ""
+                        ),
+                        "goals": phase.get("goals", []) or detail.get("practice_suggestions", []),
+                    }
+                    
+                    # 更新数据库
+                    phases[phase_index] = updated_phase
+                    await db.update_by_id("study_plans", plan_id, {"phases": phases})
+                    
+                    yield f"data: {json.dumps({'type': 'result', 'success': True, 'phaseDetail': updated_phase})}\n\n"
+                except json.JSONDecodeError as je:
+                    logger.error(f"[phase-detail/stream] JSON 解析失败: {je}")
+                    yield f"data: {json.dumps({'type': 'error', 'error': f'JSON解析失败: {str(je)}'})}\n\n"
+            else:
+                logger.error("[phase-detail/stream] AI 响应中未找到 JSON")
+                yield f"data: {json.dumps({'type': 'error', 'error': '生成格式错误，未找到有效JSON'})}\n\n"
+                
+        except Exception as e:
+            logger.error(f"[phase-detail/stream] 异常: {type(e).__name__}: {str(e)}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        
+        yield "data: [DONE]\n\n"
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # ==================== 目标达成率 API ====================
 
 
@@ -743,6 +868,159 @@ async def generate_tomorrow_tasks(request: Request):
             "message": "明日任务已生成",
         },
     }
+
+
+@router.post("/tomorrow-tasks/stream")
+async def generate_tomorrow_tasks_stream(request: Request):
+    """
+    生成明日任务（流式响应）
+    
+    返回 Server-Sent Events 格式：
+    - data: {"type": "progress", "message": "..."} - 进度更新
+    - data: {"type": "content", "content": "..."} - AI 原始输出片段
+    - data: {"type": "result", "success": true, "tasks": [...]} - 最终结果
+    - data: {"type": "error", "error": "..."} - 错误信息
+    - data: [DONE] - 结束标记
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    openid = _get_openid_from_request(request)
+    db = get_db()
+    plan_repo = PlanRepository(db)
+
+    plan = await plan_repo.get_active_plan(openid)
+    if not plan:
+        raise HTTPException(status_code=404, detail="没有活跃的学习计划")
+
+    # 确保 plan_id 是字符串格式
+    raw_id = plan.get("_id") or plan.get("id")
+    plan_id = str(raw_id) if raw_id else None
+    tomorrow_str = _beijing_date_str(1)
+    tomorrow_start, tomorrow_end = _beijing_day_range(1)
+
+    # 检查是否已有明日任务
+    existing = await db.query(
+        "plan_tasks",
+        {"openid": openid, "planId": plan_id, "dateStr": tomorrow_str},
+        limit=100,
+    )
+    if existing:
+        # 已有任务，直接返回非流式结果
+        return {
+            "success": True,
+            "data": {
+                "tasks": existing,
+                "isNew": False,
+                "message": "明日任务已存在",
+            },
+        }
+
+    # 获取学习上下文
+    today_str = _beijing_date_str(0)
+    today_tasks = await db.query(
+        "plan_tasks",
+        {"openid": openid, "planId": plan_id, "dateStr": today_str},
+        limit=100,
+    )
+    today_completed = len([t for t in today_tasks if t.get("completed")])
+    today_total = len(today_tasks)
+    completion_rate = int(round((today_completed / today_total) * 100)) if today_total else 0
+
+    # 获取当前阶段
+    current_phase = _get_current_phase(plan)
+
+    # 生成任务参数
+    domain = plan.get("domainName") or plan.get("domain", "")
+    daily_hours = float(plan.get("dailyHours") or 2)
+
+    async def generate():
+        full_content = ""
+        
+        try:
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在分析学习进度...'})}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在生成明日任务...'})}\n\n"
+            
+            # 流式调用 AI
+            async for chunk in PlanService.generate_daily_tasks_stream(
+                domain=domain,
+                daily_hours=daily_hours,
+                current_phase=current_phase,
+                learning_history={"avgCompletionRate": completion_rate},
+                today_stats={"completionRate": completion_rate},
+            ):
+                full_content += chunk
+                yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在解析任务列表...'})}\n\n"
+            
+            # 解析 JSON 数组
+            json_match = re.search(r'\[[\s\S]*\]', full_content)
+            if json_match:
+                try:
+                    tasks = json.loads(json_match.group())
+                    tasks = PlanService._validate_tasks(tasks, daily_hours)
+                    
+                    yield f"data: {json.dumps({'type': 'progress', 'message': '正在保存任务...'})}\n\n"
+                    
+                    # 保存任务
+                    saved_tasks: List[Dict[str, Any]] = []
+                    now = datetime.now(timezone.utc).isoformat()
+                    for i, t in enumerate(tasks):
+                        doc = {
+                            "planId": plan_id,
+                            "openid": openid,
+                            "phaseId": (current_phase or {}).get("id"),
+                            "title": t.get("title", f"任务{i+1}"),
+                            "description": t.get("description", ""),
+                            "duration": int(t.get("duration", 30)),
+                            "priority": t.get("priority", "medium"),
+                            "type": t.get("type", "learn"),
+                            "completed": False,
+                            "order": i,
+                            "date": {"$date": tomorrow_start.isoformat()},
+                            "dateStr": tomorrow_str,
+                            "createdAt": {"$date": now},
+                            "generatedBy": "fastapi_ai_stream",
+                        }
+                        new_id = await db.add("plan_tasks", doc)
+                        doc["_id"] = new_id
+                        saved_tasks.append(doc)
+                    
+                    # 分析信息
+                    analysis = {
+                        "avgCompletionRate": completion_rate,
+                        "adjustment": (
+                            "根据您的完成率，已适当调整任务难度"
+                            if completion_rate < 70
+                            else "继续保持当前学习节奏"
+                        ),
+                    }
+                    
+                    yield f"data: {json.dumps({'type': 'result', 'success': True, 'tasks': saved_tasks, 'analysis': analysis, 'isNew': True})}\n\n"
+                except json.JSONDecodeError as je:
+                    logger.error(f"[tomorrow-tasks/stream] JSON 解析失败: {je}")
+                    yield f"data: {json.dumps({'type': 'error', 'error': f'JSON解析失败: {str(je)}'})}\n\n"
+            else:
+                logger.error("[tomorrow-tasks/stream] AI 响应中未找到 JSON")
+                yield f"data: {json.dumps({'type': 'error', 'error': '生成格式错误，未找到有效JSON'})}\n\n"
+                
+        except Exception as e:
+            logger.error(f"[tomorrow-tasks/stream] 异常: {type(e).__name__}: {str(e)}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        
+        yield "data: [DONE]\n\n"
+    
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ==================== 其他 API ====================
