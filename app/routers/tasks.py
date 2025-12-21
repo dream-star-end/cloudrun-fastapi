@@ -20,11 +20,6 @@ from ..db.wxcloud import get_db, PlanRepository
 from ..services.plan_service import PlanService
 
 
-import logging
-
-# 配置日志
-logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/api/tasks", tags=["任务"])
 
 
@@ -173,7 +168,25 @@ async def ensure_today_tasks(request: Request):
     db = get_db()
 
     plan_repo = PlanRepository(db)
-    plan = await plan_repo.get_active_plan(openid)
+
+    # 允许前端显式指定 plan_id，避免在历史遗留“多条 active 计划”时取错计划
+    plan_id_override: Optional[str] = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            plan_id_override = body.get("plan_id") or body.get("planId")
+    except Exception:
+        body = None
+
+    plan: Optional[Dict[str, Any]] = None
+    if plan_id_override:
+        # 校验该 plan_id 归属当前用户且处于 active（否则回退到自动选择）
+        p = await db.get_by_id("study_plans", str(plan_id_override))
+        if p and p.get("openid") == openid and p.get("status") == "active":
+            plan = p
+
+    if not plan:
+        plan = await plan_repo.get_active_plan(openid)
     if not plan:
         return {"success": True, "hasActivePlan": False, "isNew": False, "tasks": []}
 
@@ -185,8 +198,6 @@ async def ensure_today_tasks(request: Request):
     
     # 计算 dateStr (YYYY-MM-DD) 用于精确匹配，避免 Date 类型和时区问题
     today_str = (today_start + timedelta(hours=8)).date().isoformat()
-    
-    logger.info(f"Checking today tasks for user {openid}, plan {plan_id}, dateStr={today_str}")
 
     # 1. 尝试通过 dateStr 查询 (新版逻辑)
     existing = await db.query(
@@ -201,11 +212,6 @@ async def ensure_today_tasks(request: Request):
         order_type="asc",
     )
     
-    if existing:
-        logger.info(f"Found {len(existing)} existing tasks via dateStr")
-    else:
-        logger.info("No tasks found via dateStr, trying legacy date range query")
-
     # 2. 如果没找到，尝试通过 date 范围查询 (兼容旧数据)
     if not existing:
         existing = await db.query(
@@ -219,21 +225,12 @@ async def ensure_today_tasks(request: Request):
             order_by="order",
             order_type="asc",
         )
-        if existing:
-            logger.info(f"Found {len(existing)} existing tasks via legacy date range")
 
     if existing:
         return {"success": True, "hasActivePlan": True, "isNew": False, "tasks": existing}
 
     # 生成任务（无则写库）
     domain = plan.get("domainName") or plan.get("domain") or ""
-    # 尝试从 goal 推断 domain，如果 domain 为空
-    if not domain and plan.get("goal"):
-        logger.warning("Domain is empty, using goal as domain hint")
-        domain = f"关于 {plan.get('goal')} 的学习"
-    
-    logger.info(f"Generating new tasks for domain: {domain}")
-    
     daily_hours = float(plan.get("dailyHours") or 2)
 
     current_phase = _get_current_phase(plan)
@@ -247,8 +244,6 @@ async def ensure_today_tasks(request: Request):
         learning_history=learning_history,
         today_stats=yesterday_stats,
     )
-    
-    logger.info(f"Generated {len(tasks)} tasks")
 
     saved: List[Dict[str, Any]] = []
     now = datetime.now(timezone.utc).isoformat()
@@ -270,7 +265,6 @@ async def ensure_today_tasks(request: Request):
             "generatedBy": "fastapi",
         }
         new_id = await db.add("plan_tasks", doc)
-        logger.info(f"Saved task {i}: {new_id}")
         doc["_id"] = new_id
         saved.append(doc)
 

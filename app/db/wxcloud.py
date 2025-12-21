@@ -795,7 +795,16 @@ class PlanRepository:
     
     async def get_active_plan(self, openid: str) -> Optional[Dict[str, Any]]:
         """获取当前活跃的学习计划"""
-        return await self.db.get_one("study_plans", {"openid": openid, "status": "active"})
+        # 可能存在历史遗留：同一用户多条 status=active 的计划
+        # 这里强制按 createdAt 倒序取最新的一条，避免任务/统计串到旧计划
+        plans = await self.db.query(
+            "study_plans",
+            {"openid": openid, "status": "active"},
+            limit=1,
+            order_by="createdAt",
+            order_type="desc",
+        )
+        return plans[0] if plans else None
     
     async def get_achievement_rate(self, openid: str) -> Dict[str, Any]:
         """获取目标达成率"""

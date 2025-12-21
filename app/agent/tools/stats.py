@@ -8,7 +8,7 @@ import logging
 import traceback
 from typing import Optional, TYPE_CHECKING
 from langchain_core.tools import tool, BaseTool
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from ...db.wxcloud import (
     UserRepository, 
@@ -452,6 +452,7 @@ def create_get_calendar_data_tool(user_id: str, memory: "AgentMemory") -> BaseTo
             该日期的学习详情
         """
         try:
+            # 兼容旧接口：传入 YYYY-MM-DD 时，按北京时间当天的 Date 范围查询
             if not date:
                 date = datetime.now().strftime('%Y-%m-%d')
             
@@ -460,8 +461,20 @@ def create_get_calendar_data_tool(user_id: str, memory: "AgentMemory") -> BaseTo
             # 获取打卡记录
             checkin = await db.get_one("checkin_records", {"openid": user_id, "date": date})
             
-            # 获取任务完成情况
-            tasks = await db.query("plan_tasks", {"openid": user_id, "date": date})
+            # 获取任务完成情况（Date 范围）
+            try:
+                beijing_day = datetime.strptime(date, "%Y-%m-%d").date()
+            except Exception:
+                beijing_day = datetime.now().date()
+            day_start = datetime(beijing_day.year, beijing_day.month, beijing_day.day, tzinfo=timezone.utc) - timedelta(hours=8)
+            day_end = day_start + timedelta(days=1)
+            tasks = await db.query(
+                "plan_tasks",
+                {
+                    "openid": user_id,
+                    "date": {"$gte": {"$date": day_start.isoformat()}, "$lt": {"$date": day_end.isoformat()}},
+                }
+            )
             
             result = f"""📅 {date} 学习详情
 
