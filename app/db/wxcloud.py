@@ -43,11 +43,12 @@ class WxCloudDB:
             raise ValueError("未配置云环境ID：请设置环境变量 TCB_ENV 或在 settings.TCB_ENV 中配置")
         
         # 访问地址
-        # 云托管开启「开放接口服务」后，容器内云调用建议使用 HTTP（更快，且免鉴权）
+        # 注意：WeChat API 需要 HTTPS，HTTP 请求会返回 301 重定向
+        # 之前尝试在云托管中使用 HTTP 内网访问，但实际返回 301，导致 JSON 解析失败
         # 参考文档：
         # - https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloudrun/src/guide/weixin/open.html
         # - https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloudrun/src/guide/weixin/token.html
-        self.base_url = "http://api.weixin.qq.com/tcb" if IS_CLOUDRUN else "https://api.weixin.qq.com/tcb"
+        self.base_url = "https://api.weixin.qq.com/tcb"
         
         # 是否在云托管环境中（有内网访问能力）- 使用统一的配置
         self.is_cloudrun = IS_CLOUDRUN

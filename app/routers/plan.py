@@ -143,6 +143,9 @@ async def get_active_plan(request: Request):
     """
     获取当前活跃计划 + 今日任务
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     openid = _get_openid_from_request(request)
     db = get_db()
     plan_repo = PlanRepository(db)
@@ -151,11 +154,15 @@ async def get_active_plan(request: Request):
     if not plan:
         return {"success": True, "hasActivePlan": False, "plan": None, "todayTasks": []}
 
-    plan_id = plan.get("_id") or plan.get("id")
+    # 确保 plan_id 是字符串格式
+    raw_id = plan.get("_id") or plan.get("id")
+    plan_id = str(raw_id) if raw_id else None
     if not plan_id:
         raise HTTPException(status_code=500, detail="学习计划缺少 _id")
 
     today_str = _beijing_date_str(0)
+    
+    logger.info(f"[plan/active] 查询今日任务: openid={openid[:8]}***, planId={plan_id}, dateStr={today_str}")
 
     # 查询今日任务
     tasks = await db.query(
@@ -165,6 +172,8 @@ async def get_active_plan(request: Request):
         order_by="order",
         order_type="asc",
     )
+    logger.info(f"[plan/active] dateStr 查询结果: {len(tasks)} 条任务")
+    
     if not tasks:
         today_start, today_end = _beijing_day_range(0)
         tasks = await db.query(
@@ -181,6 +190,7 @@ async def get_active_plan(request: Request):
             order_by="order",
             order_type="asc",
         )
+        logger.info(f"[plan/active] date 范围查询结果: {len(tasks)} 条任务")
 
     # 补充计划派生字段
     plan["daysLeft"] = _calculate_remaining_days(plan)
@@ -285,7 +295,9 @@ async def delete_plan(request: Request):
     if not plan:
         return {"success": True, "message": "没有活跃的计划"}
 
-    plan_id = plan.get("_id") or plan.get("id")
+    # 确保 plan_id 是字符串格式
+    raw_id = plan.get("_id") or plan.get("id")
+    plan_id = str(raw_id) if raw_id else None
 
     # 将计划置为 deleted
     await db.update_by_id(
@@ -419,7 +431,9 @@ async def get_achievement_rate(request: Request):
     if not plan:
         return {"success": True, "data": {"hasActivePlan": False}}
 
-    plan_id = plan.get("_id") or plan.get("id")
+    # 确保 plan_id 是字符串格式
+    raw_id = plan.get("_id") or plan.get("id")
+    plan_id = str(raw_id) if raw_id else None
 
     # 计算任务完成率（最近7天）
     today_start, _ = _beijing_day_range(0)
@@ -524,7 +538,9 @@ async def generate_tomorrow_tasks(request: Request):
     if not plan:
         raise HTTPException(status_code=404, detail="没有活跃的学习计划")
 
-    plan_id = plan.get("_id") or plan.get("id")
+    # 确保 plan_id 是字符串格式
+    raw_id = plan.get("_id") or plan.get("id")
+    plan_id = str(raw_id) if raw_id else None
     tomorrow_str = _beijing_date_str(1)
     tomorrow_start, tomorrow_end = _beijing_day_range(1)
 

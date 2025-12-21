@@ -202,33 +202,43 @@ async def ensure_today_tasks(request: Request):
     - 若今日已有任务：直接返回
     - 若今日无任务：基于活跃学习计划生成任务并写入 plan_tasks，再返回
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     openid = _get_openid_from_request(request)
     db = get_db()
 
     plan_repo = PlanRepository(db)
 
-    # 允许前端显式指定 plan_id，避免在历史遗留“多条 active 计划”时取错计划
+    # 允许前端显式指定 plan_id，避免在历史遗留"多条 active 计划"时取错计划
     plan_id_override: Optional[str] = None
     try:
         body = await request.json()
         if isinstance(body, dict):
-            plan_id_override = body.get("plan_id") or body.get("planId")
+            raw_override = body.get("plan_id") or body.get("planId")
+            plan_id_override = str(raw_override) if raw_override else None
     except Exception:
         body = None
 
     plan: Optional[Dict[str, Any]] = None
     if plan_id_override:
+        logger.info(f"[tasks/ensure] 前端指定 plan_id: {plan_id_override}")
         # 校验该 plan_id 归属当前用户且处于 active（否则回退到自动选择）
-        p = await db.get_by_id("study_plans", str(plan_id_override))
+        p = await db.get_by_id("study_plans", plan_id_override)
         if p and p.get("openid") == openid and p.get("status") == "active":
             plan = p
+            logger.info(f"[tasks/ensure] 使用前端指定的计划")
+        else:
+            logger.info(f"[tasks/ensure] 前端指定的计划不存在或不属于当前用户，将自动选择")
 
     if not plan:
         plan = await plan_repo.get_active_plan(openid)
     if not plan:
         return {"success": True, "hasActivePlan": False, "isNew": False, "tasks": []}
 
-    plan_id = plan.get("_id") or plan.get("id")
+    # 确保 plan_id 是字符串格式
+    raw_id = plan.get("_id") or plan.get("id")
+    plan_id = str(raw_id) if raw_id else None
     if not plan_id:
         raise HTTPException(status_code=500, detail="学习计划缺少 _id")
 
@@ -236,6 +246,8 @@ async def ensure_today_tasks(request: Request):
     
     # 计算 dateStr (YYYY-MM-DD) 用于精确匹配，避免 Date 类型和时区问题
     today_str = (today_start + timedelta(hours=8)).date().isoformat()
+    
+    logger.info(f"[tasks/ensure] 查询今日任务: openid={openid[:8]}***, planId={plan_id}, dateStr={today_str}")
 
     # 1. 尝试通过 dateStr 查询 (新版逻辑)
     existing = await db.query(
@@ -249,6 +261,7 @@ async def ensure_today_tasks(request: Request):
         order_by="order",
         order_type="asc",
     )
+    logger.info(f"[tasks/ensure] dateStr 查询结果: {len(existing)} 条任务")
     
     # 2. 如果没找到，尝试通过 date 范围查询 (兼容旧数据)
     if not existing:
@@ -263,11 +276,14 @@ async def ensure_today_tasks(request: Request):
             order_by="order",
             order_type="asc",
         )
+        logger.info(f"[tasks/ensure] date 范围查询结果: {len(existing)} 条任务")
 
     if existing:
+        logger.info(f"[tasks/ensure] 返回已存在的任务")
         return {"success": True, "hasActivePlan": True, "isNew": False, "tasks": existing}
 
     # 生成任务（无则写库）
+    logger.info(f"[tasks/ensure] 开始生成今日任务")
     domain = plan.get("domainName") or plan.get("domain") or ""
     daily_hours = float(plan.get("dailyHours") or 2)
 
@@ -285,6 +301,7 @@ async def ensure_today_tasks(request: Request):
         today_stats=yesterday_stats,
         learning_context=learning_context,
     )
+    logger.info(f"[tasks/ensure] AI 生成了 {len(tasks)} 条任务")
 
     # 并发兜底：若在我们生成期间已有其它请求写入，则直接返回已存在任务，避免重复写入
     existing_after = await db.query(
@@ -295,13 +312,14 @@ async def ensure_today_tasks(request: Request):
         order_type="asc",
     )
     if existing_after:
+        logger.info(f"[tasks/ensure] 生成期间已有其他请求写入，返回已存在的 {len(existing_after)} 条任务")
         return {"success": True, "hasActivePlan": True, "isNew": False, "tasks": existing_after}
 
     saved: List[Dict[str, Any]] = []
     now = datetime.now(timezone.utc).isoformat()
     for i, t in enumerate(tasks):
         doc = {
-            "planId": plan_id,
+            "planId": plan_id,  # 已确保是字符串格式
             "openid": openid,
             "phaseId": (current_phase or {}).get("id"),
             "title": t.get("title", f"任务{i+1}"),
@@ -320,7 +338,8 @@ async def ensure_today_tasks(request: Request):
         new_id = await db.add("plan_tasks", doc)
         doc["_id"] = new_id
         saved.append(doc)
-
+    
+    logger.info(f"[tasks/ensure] 成功保存 {len(saved)} 条任务，planId={plan_id}, dateStr={today_str}")
     return {"success": True, "hasActivePlan": True, "isNew": True, "tasks": saved}
 
 
@@ -330,14 +349,18 @@ async def get_today_tasks(request: Request):
     获取今日任务（不生成）
     - 可选 query: plan_id（避免多 active 计划时串台）
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     openid = _get_openid_from_request(request)
     db = get_db()
     plan_repo = PlanRepository(db)
 
-    plan_id_override = request.query_params.get("plan_id") or request.query_params.get("planId")
+    raw_override = request.query_params.get("plan_id") or request.query_params.get("planId")
+    plan_id_override = str(raw_override) if raw_override else None
     plan: Optional[Dict[str, Any]] = None
     if plan_id_override:
-        p = await db.get_by_id("study_plans", str(plan_id_override))
+        p = await db.get_by_id("study_plans", plan_id_override)
         if p and p.get("openid") == openid and p.get("status") == "active":
             plan = p
     if not plan:
@@ -345,9 +368,13 @@ async def get_today_tasks(request: Request):
     if not plan:
         return {"success": True, "hasActivePlan": False, "tasks": []}
 
-    plan_id = plan.get("_id") or plan.get("id")
+    # 确保 plan_id 是字符串格式
+    raw_id = plan.get("_id") or plan.get("id")
+    plan_id = str(raw_id) if raw_id else None
     today_start, today_end = _beijing_day_range(0)
     today_str = (today_start + timedelta(hours=8)).date().isoformat()
+    
+    logger.info(f"[tasks/today] 查询今日任务: openid={openid[:8]}***, planId={plan_id}, dateStr={today_str}")
 
     tasks = await db.query(
         "plan_tasks",
@@ -364,6 +391,8 @@ async def get_today_tasks(request: Request):
             order_by="order",
             order_type="asc",
         )
+    
+    logger.info(f"[tasks/today] 查询结果: {len(tasks)} 条任务")
     return {"success": True, "hasActivePlan": True, "dateStr": today_str, "tasks": tasks}
 
 
@@ -401,7 +430,8 @@ async def toggle_task(request: Request):
     if not ok:
         raise HTTPException(status_code=500, detail="更新失败")
 
-    plan_id = task.get("planId")
+    raw_plan_id = task.get("planId")
+    plan_id = str(raw_plan_id) if raw_plan_id else None
     if not plan_id:
         return {"success": True}
 
@@ -454,6 +484,78 @@ async def toggle_task(request: Request):
     }
 
 
+@router.post("/migrate-datestr")
+async def migrate_datestr(request: Request):
+    """
+    数据迁移：为旧的 plan_tasks 记录补充 dateStr 字段
+    仅需执行一次
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    db = get_db()
+    
+    # 查询所有没有 dateStr 字段的任务（通过 date 字段存在但 dateStr 不存在来判断）
+    # 由于云开发数据库不支持 $exists，我们改为查询所有任务然后过滤
+    all_tasks = await db.query(
+        "plan_tasks",
+        {},  # 查询所有
+        limit=1000,
+    )
+    
+    migrated_count = 0
+    errors = []
+    
+    for task in all_tasks:
+        # 跳过已有 dateStr 的记录
+        if task.get("dateStr"):
+            continue
+        
+        task_id = task.get("_id")
+        if not task_id:
+            continue
+        
+        # 从 date 字段提取日期
+        date_val = task.get("date")
+        if not date_val:
+            continue
+        
+        try:
+            # 解析 date 字段
+            if isinstance(date_val, dict) and "$date" in date_val:
+                date_str_raw = date_val["$date"]
+                from datetime import datetime
+                dt = datetime.fromisoformat(date_str_raw.replace("Z", "+00:00"))
+            elif isinstance(date_val, str):
+                from datetime import datetime
+                dt = datetime.fromisoformat(date_val.replace("Z", "+00:00"))
+            else:
+                continue
+            
+            # 转换为北京时间日期字符串
+            from datetime import timedelta
+            beijing_dt = dt + timedelta(hours=8)
+            date_str = beijing_dt.strftime("%Y-%m-%d")
+            
+            # 更新记录
+            await db.update_by_id("plan_tasks", str(task_id), {"dateStr": date_str})
+            migrated_count += 1
+            logger.info(f"[migrate] 已迁移任务 {task_id}: dateStr={date_str}")
+            
+        except Exception as e:
+            errors.append({"task_id": task_id, "error": str(e)})
+            logger.error(f"[migrate] 迁移任务 {task_id} 失败: {e}")
+    
+    return {
+        "success": True,
+        "data": {
+            "total_tasks": len(all_tasks),
+            "migrated": migrated_count,
+            "errors": errors,
+        }
+    }
+
+
 @router.post("/scheduler/generate-all")
 async def scheduler_generate_all_tasks(request: Request):
     """
@@ -487,7 +589,8 @@ async def scheduler_generate_all_tasks(request: Request):
     for plan in plans:
         try:
             openid = plan.get("openid")
-            plan_id = plan.get("_id") or plan.get("id")
+            raw_id = plan.get("_id") or plan.get("id")
+            plan_id = str(raw_id) if raw_id else None
             
             if not openid or not plan_id:
                 continue
