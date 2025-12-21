@@ -36,6 +36,12 @@ class PlanService:
         Returns:
             学习计划字典
         """
+        import logging
+        import asyncio
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"[PlanService] 开始生成计划: goal={goal[:50] if goal else ''}, domain={domain}")
+        
         prompt = cls._build_plan_prompt(
             goal, domain, daily_hours, deadline, current_level, preferences
         )
@@ -43,23 +49,44 @@ class PlanService:
         messages = [{"role": "user", "content": prompt}]
         
         try:
-            response = await AIService.chat(
-                messages=messages,
-                model_type="text",
-                temperature=0.7,
-                max_tokens=4000,
+            logger.info("[PlanService] 调用 AI 服务...")
+            
+            # 设置 50 秒超时，留出余量给微信云托管（默认 60 秒）
+            response = await asyncio.wait_for(
+                AIService.chat(
+                    messages=messages,
+                    model_type="text",
+                    temperature=0.7,
+                    max_tokens=4000,
+                ),
+                timeout=50.0
             )
+            
+            logger.info(f"[PlanService] AI 响应长度: {len(response) if response else 0}")
             
             # 解析 JSON
             json_match = re.search(r'\{[\s\S]*\}', response)
             if json_match:
-                plan = json.loads(json_match.group())
-                return {"success": True, "plan": plan}
+                try:
+                    plan = json.loads(json_match.group())
+                    logger.info(f"[PlanService] 计划解析成功, phases数量: {len(plan.get('phases', []))}")
+                    return {"success": True, "plan": plan}
+                except json.JSONDecodeError as je:
+                    logger.error(f"[PlanService] JSON 解析失败: {je}")
+                    logger.error(f"[PlanService] 原始响应: {response[:500] if response else 'None'}...")
+                    return {"success": False, "error": f"JSON解析失败: {str(je)}"}
             
-            return {"success": False, "error": "计划生成格式错误"}
+            logger.error(f"[PlanService] AI 响应中未找到 JSON 格式数据")
+            logger.error(f"[PlanService] 原始响应: {response[:500] if response else 'None'}...")
+            return {"success": False, "error": "计划生成格式错误，AI未返回有效JSON"}
+        
+        except asyncio.TimeoutError:
+            logger.error("[PlanService] AI 调用超时 (50秒)")
+            return {"success": False, "error": "AI 生成超时，请稍后重试"}
             
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            logger.error(f"[PlanService] 生成计划异常: {type(e).__name__}: {str(e)}", exc_info=True)
+            return {"success": False, "error": f"生成失败: {str(e)}"}
     
     @classmethod
     async def generate_daily_tasks(

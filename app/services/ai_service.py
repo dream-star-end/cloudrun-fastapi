@@ -50,34 +50,61 @@ class AIService:
         Returns:
             AI 回复内容
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         config = AI_MODELS.get(model_type, AI_MODELS["text"])
+        
+        # 检查 API Key 配置
+        if not config.get('api_key'):
+            logger.error(f"[AIService] {model_type} 模型 API Key 未配置")
+            raise ValueError(f"AI 服务配置错误：{model_type} 模型 API Key 未设置")
         
         # 构建完整的消息列表
         full_messages = cls._build_messages(messages, user_memory)
         
-        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
-            response = await client.post(
-                f"{config['base_url']}/chat/completions",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {config['api_key']}",
-                },
-                json={
-                    "model": config["model"],
-                    "messages": full_messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": False,
-                },
-            )
-            
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get("choices") and data["choices"][0].get("message"):
-                return data["choices"][0]["message"]["content"]
-            
-            raise ValueError("AI 返回格式错误")
+        logger.info(f"[AIService] 开始 AI 调用: model={config['model']}, max_tokens={max_tokens}")
+        
+        try:
+            async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
+                response = await client.post(
+                    f"{config['base_url']}/chat/completions",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {config['api_key']}",
+                    },
+                    json={
+                        "model": config["model"],
+                        "messages": full_messages,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "stream": False,
+                    },
+                )
+                
+                logger.info(f"[AIService] AI 响应状态码: {response.status_code}")
+                
+                if response.status_code != 200:
+                    error_text = response.text[:500] if response.text else "无响应内容"
+                    logger.error(f"[AIService] AI API 错误: status={response.status_code}, body={error_text}")
+                    raise ValueError(f"AI API 错误 ({response.status_code}): {error_text[:200]}")
+                
+                data = response.json()
+                
+                if data.get("choices") and data["choices"][0].get("message"):
+                    content = data["choices"][0]["message"]["content"]
+                    logger.info(f"[AIService] AI 调用成功, 响应长度: {len(content)}")
+                    return content
+                
+                logger.error(f"[AIService] AI 返回格式异常: {json.dumps(data, ensure_ascii=False)[:500]}")
+                raise ValueError("AI 返回格式错误")
+                
+        except httpx.TimeoutException as e:
+            logger.error(f"[AIService] AI 调用超时: {e}")
+            raise ValueError(f"AI 服务响应超时，请稍后重试")
+        except httpx.RequestError as e:
+            logger.error(f"[AIService] AI 网络请求错误: {type(e).__name__}: {e}")
+            raise ValueError(f"AI 服务网络错误: {str(e)}")
     
     @classmethod
     async def chat_stream(

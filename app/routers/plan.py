@@ -320,6 +320,12 @@ async def generate_plan(request: GeneratePlanRequest):
     """
     AI 生成学习计划
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"[plan/generate] 收到请求: goal={request.goal[:50] if request.goal else ''}, domain={request.domain}")
+    logger.info(f"[plan/generate] 参数: daily_hours={request.daily_hours}, deadline={request.deadline}, level={request.current_level}")
+    
     try:
         result = await PlanService.generate_study_plan(
             goal=request.goal,
@@ -330,15 +336,20 @@ async def generate_plan(request: GeneratePlanRequest):
             preferences=request.preferences,
         )
 
+        logger.info(f"[plan/generate] AI 生成结果: success={result.get('success')}")
+        
         if result.get("success"):
             return GeneratePlanResponse(success=True, plan=result.get("plan"))
         else:
-            raise HTTPException(status_code=500, detail=result.get("error", "生成失败"))
+            error_msg = result.get("error", "生成失败")
+            logger.error(f"[plan/generate] 生成失败: {error_msg}")
+            raise HTTPException(status_code=500, detail=error_msg)
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"[plan/generate] 异常: {type(e).__name__}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"计划生成异常: {str(e)}")
 
 
 @router.post("/phase-detail")
