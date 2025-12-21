@@ -62,11 +62,11 @@ class DbProxy:
         """
         根据 _id 获取文档（兼容 WxCloudDB.get_by_id 的使用方式）。
 
-        DbProxy 走自建的 /db/* 代理接口，这里用 get_one 做等价实现。
+        使用专门的 /db/get_by_id 接口，走 .doc(doc_id).get() 比 where 查 _id 更可靠。
         """
         if not doc_id:
             return None
-        return await self.get_one(collection, {"_id": doc_id})
+        return await self._post("/db/get_by_id", {"collection": collection, "doc_id": doc_id})
 
     async def add(self, collection: str, data: Dict[str, Any]) -> str:
         r = await self._post("/db/add", {"collection": collection, "data": data})
