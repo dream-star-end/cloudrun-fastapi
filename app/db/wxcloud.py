@@ -538,12 +538,21 @@ class ResilientDB:
     async def _call_with_fallback(self, method: str, *args, **kwargs):
         try:
             fn = getattr(self.primary, method)
-            return await fn(*args, **kwargs)
+            result = await fn(*args, **kwargs)
+            logger.debug(f"[DB] {method} via primary, args={args[:2] if args else []}")
+            return result
         except httpx.RequestError as e:
             # DbProxy 网络错误（ConnectError/Timeout等） -> fallback
             if not self.fallback:
                 raise
             logger.warning(f"[DB] DbProxy 网络错误，已降级到 WxCloudDB: {type(e).__name__}: {e}")
+            fn2 = getattr(self.fallback, method)
+            return await fn2(*args, **kwargs)
+        except Exception as e:
+            # 其他错误（如 500、解析错误等），也尝试 fallback
+            if not self.fallback:
+                raise
+            logger.warning(f"[DB] DbProxy {method} 异常，尝试降级到 WxCloudDB: {type(e).__name__}: {e}")
             fn2 = getattr(self.fallback, method)
             return await fn2(*args, **kwargs)
 

@@ -441,6 +441,9 @@ async def generate_phase_detail(request: Request):
     """
     生成学习阶段详情（替代云函数 generatePhaseDetail）
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     openid = _get_openid_from_request(request)
     db = get_db()
 
@@ -455,12 +458,21 @@ async def generate_phase_detail(request: Request):
     if not plan_id or not phase_id:
         raise HTTPException(status_code=400, detail="缺少 planId 或 phaseId")
 
+    logger.info(f"[phase-detail] 请求: planId={plan_id}, phaseId={phase_id}, openid={openid[:8] if openid else 'None'}***")
+
     # 获取计划
     plan = await db.get_by_id("study_plans", plan_id)
+    
     if not plan:
-        raise HTTPException(status_code=404, detail="计划不存在")
-    if plan.get("openid") != openid:
-        raise HTTPException(status_code=403, detail="无权访问该计划")
+        logger.error(f"[phase-detail] 计划不存在: planId={plan_id}")
+        raise HTTPException(status_code=404, detail=f"计划不存在: {plan_id}")
+    
+    plan_openid = plan.get("openid")
+    logger.info(f"[phase-detail] 计划查询结果: plan_openid={plan_openid[:8] if plan_openid else 'None'}***, plan_keys={list(plan.keys())[:5]}")
+    
+    if plan_openid != openid:
+        logger.warning(f"[phase-detail] openid不匹配: request={openid[:8] if openid else 'None'}***, plan={plan_openid[:8] if plan_openid else 'None'}***")
+        raise HTTPException(status_code=403, detail=f"无权访问该计划 (plan_openid={plan_openid[:8] if plan_openid else 'None'}***)")
 
     # 找到对应阶段
     phases = plan.get("phases") or []
