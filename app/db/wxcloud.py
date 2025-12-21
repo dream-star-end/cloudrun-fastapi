@@ -48,7 +48,7 @@ class WxCloudDB:
         # 参考文档：
         # - https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloudrun/src/guide/weixin/open.html
         # - https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloudrun/src/guide/weixin/token.html
-        self.base_url = "https://api.weixin.qq.com/tcb"
+        self.base_url = "http://api.weixin.qq.com/tcb"
         
         # 是否在云托管环境中（有内网访问能力）- 使用统一的配置
         self.is_cloudrun = IS_CLOUDRUN
