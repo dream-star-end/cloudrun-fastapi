@@ -140,6 +140,16 @@ def _calculate_remaining_days(plan: Dict[str, Any]) -> Optional[int]:
 # ==================== 计划管理 API ====================
 
 
+@router.get("/whoami")
+async def whoami(request: Request):
+    """
+    获取当前用户身份信息
+    用于前端获取并缓存 openid，以便在流式请求中使用
+    """
+    openid = _get_openid_from_request(request)
+    return {"success": True, "openid": openid}
+
+
 @router.get("/active")
 async def get_active_plan(request: Request):
     """
