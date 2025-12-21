@@ -21,13 +21,79 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+def _normalize_tags(tags: List[str]) -> List[str]:
+    out: List[str] = []
+    for t in tags or []:
+        if not isinstance(t, str):
+            continue
+        s = t.strip().strip(",，;；、").strip()
+        if not s:
+            continue
+        out.append(s[:24])
+    # 去重
+    seen = set()
+    uniq: List[str] = []
+    for t in out:
+        k = t.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(t)
+    return uniq[:8]
+
+
+async def _ai_generate_tags(question: str, user_answer: str = "", correct_answer: str = "", analysis: str = "") -> List[str]:
+    """
+    用 LLM 为错题生成标签（不预置）。
+    返回短标签列表（3~6 个，最多 8 个）。
+    """
+    llm = ChatOpenAI(
+        model=settings.DEEPSEEK_MODEL,
+        api_key=settings.DEEPSEEK_API_KEY,
+        base_url=settings.DEEPSEEK_API_BASE,
+        temperature=0.2,
+    )
+
+    prompt = f"""请为下面这道错题生成标签（tags）。
+要求：
+- 输出必须是严格的 JSON 数组，例如 ["一元二次方程","配方法","计算错误"]
+- 3~6 个标签
+- 标签要短（中文优先），只包含主题/知识点/技能/错误类型，不要句子，不要编号
+- 不要输出任何额外文字
+
+题目：{question}
+我的答案：{user_answer}
+正确答案：{correct_answer}
+补充说明：{analysis}
+"""
+
+    resp = await llm.ainvoke([{"role": "user", "content": prompt}])
+    text = resp.content if resp else ""
+    try:
+        v = json.loads(text)
+        if isinstance(v, list):
+            return _normalize_tags([str(x) for x in v])
+    except Exception:
+        pass
+    # 兜底：从中间提取 JSON 数组
+    try:
+        import re
+        m = re.search(r"\[[\s\S]*\]", text or "")
+        if m:
+            v = json.loads(m.group())
+            if isinstance(v, list):
+                return _normalize_tags([str(x) for x in v])
+    except Exception:
+        pass
+    return []
+
 
 def create_get_mistakes_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
     """获取错题列表工具"""
     
     @tool
     async def get_mistakes(
-        category: Optional[str] = None,
+        tag: Optional[str] = None,
         status: str = "all",
     ) -> str:
         """获取用户的错题本内容。
@@ -41,7 +107,7 @@ def create_get_mistakes_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
         Returns:
             错题列表信息
         """
-        logger.info(f"[get_mistakes] 开始获取错题列表, user_id={user_id}, category={category}, status={status}")
+        logger.info(f"[get_mistakes] 开始获取错题列表, user_id={user_id}, tag={tag}, status={status}")
         
         try:
             logger.debug("[get_mistakes] 创建 MistakeRepository...")
@@ -55,7 +121,7 @@ def create_get_mistakes_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
             # 获取错题列表
             mastered = True if status == "mastered" else (False if status == "pending" else None)
             logger.debug(f"[get_mistakes] 获取错题列表, mastered={mastered}...")
-            mistakes = await repo.get_mistakes(user_id, category=category, mastered=mastered, limit=10)
+            mistakes = await repo.get_mistakes(user_id, category=None, tag=tag, mastered=mastered, limit=10)
             logger.debug(f"[get_mistakes] 获取到 {len(mistakes)} 条错题")
             
             result = f"""📕 错题本
@@ -66,30 +132,27 @@ def create_get_mistakes_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
 - 已掌握：{stats.get('mastered', 0)} 题
 """
             
-            # 按分类统计
-            by_category = stats.get('byCategory', {})
-            if by_category:
-                result += "\n📂 分类统计：\n"
-                category_names = {
-                    "math": "数学",
-                    "english": "英语",
-                    "physics": "物理",
-                    "chemistry": "化学",
-                    "other": "其他",
-                }
-                for cat, data in by_category.items():
-                    name = category_names.get(cat, cat)
-                    result += f"  - {name}：{data['total']} 题（已掌握 {data['mastered']}）\n"
+            # 按标签统计（展示 Top N）
+            by_tag = stats.get("byTag", {}) or {}
+            if by_tag:
+                result += "\n🏷️ 常见标签（Top 5）：\n"
+                top = sorted(by_tag.items(), key=lambda x: x[1], reverse=True)[:5]
+                for t, c in top:
+                    result += f"  - {t}：{c} 题\n"
             
             # 显示错题列表
             if mistakes:
-                result += f"\n📋 {'最近' if not category else category_names.get(category, category)}错题：\n"
+                result += f"\n📋 {'最近' if not tag else ('标签「' + str(tag) + '」')}错题：\n"
                 for i, mistake in enumerate(mistakes[:5], 1):
                     question = mistake.get("question", "")
                     if len(question) > 30:
                         question = question[:30] + "..."
                     status_icon = "✅" if mistake.get("mastered") else "❌"
-                    result += f"  {i}. {status_icon} {question}\n"
+                    tags = mistake.get("tags") or []
+                    tag_str = ""
+                    if isinstance(tags, list) and tags:
+                        tag_str = " [" + "、".join([str(x) for x in tags[:3] if x]) + "]"
+                    result += f"  {i}. {status_icon} {question}{tag_str}\n"
             
             result += "\n💡 功能提示：\n"
             result += "  - 发送题目图片，我可以帮你分析错因\n"
@@ -127,7 +190,7 @@ def create_add_mistake_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
         question: str,
         user_answer: Optional[str] = None,
         correct_answer: Optional[str] = None,
-        category: str = "other",
+        analysis: Optional[str] = None,
     ) -> str:
         """添加一道新的错题到错题本。
         
@@ -145,29 +208,30 @@ def create_add_mistake_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
         try:
             repo = MistakeRepository()
             
+            tags = await _ai_generate_tags(
+                question=question,
+                user_answer=user_answer or "",
+                correct_answer=correct_answer or "",
+                analysis=analysis or "",
+            )
+
             data = {
                 "question": question,
                 "answer": user_answer or "",
                 "correctAnswer": correct_answer or "",
-                "category": category,
+                "analysis": analysis or "",
+                "tags": tags,
+                "source": "agent",
             }
             
             mistake_id = await repo.add_mistake(user_id, data)
             
-            category_names = {
-                "math": "数学",
-                "english": "英语",
-                "physics": "物理",
-                "chemistry": "化学",
-                "other": "其他",
-            }
-            
             return f"""✅ 错题已记录！
 
 📝 题目：{question[:100]}{'...' if len(question) > 100 else ''}
-📂 分类：{category_names.get(category, '其他')}
 ❌ 你的答案：{user_answer or '未填写'}
 ✅ 正确答案：{correct_answer or '待补充'}
+🏷️ 标签：{'、'.join(tags) if tags else '（AI 暂未生成）'}
 
 💡 下一步建议：
 1. 让我帮你分析这道题的错因

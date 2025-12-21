@@ -786,6 +786,7 @@ class MistakeRepository:
         self,
         openid: str,
         category: Optional[str] = None,
+        tag: Optional[str] = None,
         mastered: Optional[bool] = None,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
@@ -793,6 +794,11 @@ class MistakeRepository:
         query = {"openid": openid}
         if category and category != "all":
             query["category"] = category
+        if tag:
+            t = str(tag).strip()
+            if t:
+                # tags 为数组字段，使用 $all 语义匹配包含该标签
+                query["tags"] = {"$all": [t]}
         if mastered is not None:
             query["mastered"] = mastered
         
@@ -809,6 +815,14 @@ class MistakeRepository:
         data["openid"] = openid
         data["mastered"] = False
         data["reviewCount"] = 0
+        # 标记来源（用于前端兼容旧数据语义）
+        data.setdefault("source", "agent")
+        data.setdefault("tags", [])
+        # 补齐时间字段（云托管直连不会自动写 serverDate）
+        now = {"$date": datetime.now().isoformat()}
+        data.setdefault("createdAt", now)
+        data["updatedAt"] = now
+        data.setdefault("lastReviewAt", None)
         return await self.db.add("mistakes", data)
     
     async def mark_mastered(self, mistake_id: str, mastered: bool = True) -> bool:
@@ -834,12 +848,27 @@ class MistakeRepository:
             by_category[cat]["total"] += 1
             if m.get("mastered"):
                 by_category[cat]["mastered"] += 1
+
+        # 按标签统计（新版本）
+        by_tag: Dict[str, int] = {}
+        for m in all_mistakes:
+            tags = m.get("tags") or []
+            if not isinstance(tags, list):
+                continue
+            for t in tags:
+                if not t:
+                    continue
+                key = str(t).strip()
+                if not key:
+                    continue
+                by_tag[key] = by_tag.get(key, 0) + 1
         
         return {
             "total": total,
             "mastered": mastered,
             "pending": total - mastered,
             "byCategory": by_category,
+            "byTag": by_tag,
         }
 
 

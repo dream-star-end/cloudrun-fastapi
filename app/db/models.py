@@ -148,7 +148,10 @@ class Mistake(BaseModel):
     question: str
     answer: str = ""
     correctAnswer: str = ""
-    category: str = "other"  # math, english, physics, chemistry, other
+    # 兼容字段：历史版本使用预置分类；新版本推荐使用 tags
+    category: str = "other"  # legacy
+    tags: List[str] = []
+    source: str = ""
     analysis: str = ""
     aiAnalysis: str = ""
     imageUrl: str = ""
