@@ -58,6 +58,16 @@ class DbProxy:
     async def get_one(self, collection: str, query: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return await self._post("/db/get_one", {"collection": collection, "where": query})
 
+    async def get_by_id(self, collection: str, doc_id: str) -> Optional[Dict[str, Any]]:
+        """
+        根据 _id 获取文档（兼容 WxCloudDB.get_by_id 的使用方式）。
+
+        DbProxy 走自建的 /db/* 代理接口，这里用 get_one 做等价实现。
+        """
+        if not doc_id:
+            return None
+        return await self.get_one(collection, {"_id": doc_id})
+
     async def add(self, collection: str, data: Dict[str, Any]) -> str:
         r = await self._post("/db/add", {"collection": collection, "data": data})
         # @cloudbase/node-sdk 返回的字段一般包含 id
