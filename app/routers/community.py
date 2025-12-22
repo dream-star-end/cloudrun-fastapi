@@ -64,7 +64,7 @@ def _get_openid_from_request(request: Request) -> str:
 
 async def _get_user_info(db, openid: str) -> dict:
     """获取用户基本信息"""
-    user = await db.get("users", {"openid": openid})
+    user = await db.get_one("users", {"openid": openid})
     if user:
         return {
             "openid": openid,
@@ -218,7 +218,7 @@ async def share_plan(request: Request, body: SharePlanRequest):
         raise HTTPException(status_code=400, detail="请输入分享标题")
     
     # 检查是否已分享过此计划
-    existing = await db.get(
+    existing = await db.get_one(
         "shared_plans",
         {"openid": openid, "originalPlanId": plan_id, "status": "active"}
     )
@@ -297,7 +297,7 @@ async def toggle_like(request: Request, body: LikeRequest):
         raise HTTPException(status_code=404, detail="计划不存在")
     
     # 检查是否已点赞
-    existing_like = await db.get(
+    existing_like = await db.get_one(
         "community_likes",
         {"planId": plan_id, "openid": openid}
     )
