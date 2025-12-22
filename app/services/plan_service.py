@@ -11,6 +11,82 @@ from ..config import AI_MODELS
 
 class PlanService:
     """学习计划服务类"""
+
+    @classmethod
+    def _infer_goal_type(cls, goal: str, domain: str = "") -> str:
+        """
+        推断目标类型：exam/skill/project/other
+        - exam: 考试、证书、刷题导向
+        - project: 项目交付、作品集、上线导向
+        - skill: 技能提升（默认）
+        """
+        text = f"{goal or ''} {domain or ''}".lower()
+        exam_kw = ["考试", "考研", "雅思", "托福", "cet", "四级", "六级", "证书", "资格", "真题", "刷题", "面试"]
+        project_kw = ["项目", "作品", "上线", "交付", "需求", "产品", "demo", "portfolio", "开源"]
+        if any(k in text for k in project_kw):
+            return "project"
+        if any(k in text for k in exam_kw):
+            return "exam"
+        return "skill"
+
+    @classmethod
+    def _normalize_preferences(cls, preferences: Optional[Dict], goal: str, domain: str) -> Dict:
+        """
+        统一偏好字段命名，允许前端/不同版本以多种 key 传入。
+        返回：
+        - goal_type: exam/skill/project/other
+        - weekly_days: 1-7
+        - modality: video/reading/practice/mixed
+        - intensity: low/medium/high (节奏强度)
+        - time_slots: 可选，用户偏好的时间段描述
+        """
+        preferences = preferences or {}
+        if not isinstance(preferences, dict):
+            return {
+                "goal_type": cls._infer_goal_type(goal, domain),
+                "weekly_days": 6,
+                "modality": "mixed",
+                "intensity": "medium",
+            }
+
+        goal_type = (
+            preferences.get("goal_type")
+            or preferences.get("goalType")
+            or preferences.get("targetType")
+            or preferences.get("target_type")
+        )
+        goal_type = str(goal_type).strip().lower() if goal_type else ""
+        if goal_type not in ["exam", "skill", "project", "other"]:
+            goal_type = cls._infer_goal_type(goal, domain)
+
+        weekly_days = preferences.get("weekly_days") or preferences.get("weeklyDays") or preferences.get("days_per_week")
+        try:
+            weekly_days = int(weekly_days) if weekly_days is not None else 6
+        except Exception:
+            weekly_days = 6
+        weekly_days = max(1, min(7, weekly_days))
+
+        modality = preferences.get("modality") or preferences.get("modalityPreference") or preferences.get("learningModality")
+        modality = str(modality).strip().lower() if modality else "mixed"
+        if modality not in ["video", "reading", "practice", "mixed"]:
+            modality = "mixed"
+
+        intensity = preferences.get("intensity") or preferences.get("pace") or preferences.get("rhythm")
+        intensity = str(intensity).strip().lower() if intensity else "medium"
+        if intensity not in ["low", "medium", "high"]:
+            intensity = "medium"
+
+        time_slots = preferences.get("time_slots") or preferences.get("timeSlots") or preferences.get("availableTimeSlots")
+        time_slots = time_slots if isinstance(time_slots, (list, str, dict)) else None
+
+        return {
+            "goal_type": goal_type,
+            "weekly_days": weekly_days,
+            "modality": modality,
+            "intensity": intensity,
+            "time_slots": time_slots,
+            **preferences,  # 保留其它自定义字段，便于后续扩展
+        }
     
     @classmethod
     async def generate_study_plan(
@@ -428,21 +504,59 @@ class PlanService:
         preferences: Optional[Dict],
     ) -> str:
         """构建学习计划生成提示词"""
+        prefs = cls._normalize_preferences(preferences, goal, domain)
+        goal_type = prefs.get("goal_type", "skill")
+        weekly_days = prefs.get("weekly_days", 6)
+        modality = prefs.get("modality", "mixed")
+        intensity = prefs.get("intensity", "medium")
+        time_slots = prefs.get("time_slots")
+
         level_desc = {
             "beginner": "零基础/入门",
             "intermediate": "有一定基础/中级",
             "advanced": "基础扎实/进阶",
         }
-        
+
+        goal_type_desc = {
+            "exam": "考试/刷题/证书导向（强调真题、错题闭环、稳定性）",
+            "skill": "技能提升导向（强调可迁移能力、结构化知识体系）",
+            "project": "项目/作品导向（强调可交付产出、里程碑、迭代）",
+            "other": "通用学习导向",
+        }
+
+        modality_desc = {
+            "video": "偏好视频/课程（需要拆成短视频块 + 关键笔记）",
+            "reading": "偏好阅读/文档（需要精读+要点提炼）",
+            "practice": "偏好练习/动手（需要更多题目/编码/实验）",
+            "mixed": "混合偏好（学习/练习/复盘均衡）",
+        }
+
+        intensity_desc = {
+            "low": "低强度（更轻松、更可持续，避免挫败）",
+            "medium": "中等强度（稳定推进，留出缓冲）",
+            "high": "高强度（更紧凑，强调挑战与反馈）",
+        }
+
         prompt = f"""你是一位资深的学习规划师，请根据以下信息制定一份详细的学习计划：
 
 【学习目标】{goal}
 【学习领域】{domain}
 【当前水平】{level_desc.get(current_level, current_level)}
 【每日可用时间】{daily_hours}小时
+【每周学习天数】{weekly_days}天
 {"【目标截止日期】" + deadline if deadline else ""}
+【目标类型】{goal_type_desc.get(goal_type, goal_type)}
+【偏好媒介】{modality_desc.get(modality, modality)}
+【节奏强度】{intensity_desc.get(intensity, intensity)}
+{"【可用时间段】" + (json.dumps(time_slots, ensure_ascii=False) if not isinstance(time_slots, str) else time_slots) if time_slots else ""}
 
-请返回JSON格式的学习计划（只返回JSON）：
+请返回JSON格式的学习计划（只返回JSON）。并在计划中体现“个性化强度与节奏”：
+- 如果【目标类型】是考试：练习/复盘占比更高，包含错题闭环与阶段测验；强调“稳定性”
+- 如果【目标类型】是项目：每阶段要有可交付物（Demo/功能点），每周要有里程碑
+- 如果【偏好媒介】是视频：把学习拆成“观看-笔记-复述-练习”的闭环，并给出短任务
+- 如果【节奏强度】较低：单日任务更少、更容易完成；强度较高：挑战更大但要有恢复任务
+
+输出里可以额外包含字段（如 intensity/cadence/modalityPlan），但必须至少包含以下字段：
 {{
     "goal": "学习目标",
     "domain": "学习领域",
@@ -469,12 +583,9 @@ class PlanService:
 1. 阶段划分合理，循序渐进
 2. 每个阶段有明确可衡量的目标
 3. 考虑用户的时间限制
-4. 提供实用的学习建议"""
+4. 提供实用的学习建议
+5. 计划要“可执行”，避免空泛描述；尽量给出量化指标（页数/题数/时长/产出）"""
 
-        if preferences:
-            pref_str = ", ".join([f"{k}: {v}" for k, v in preferences.items()])
-            prompt += f"\n【学习偏好】{pref_str}"
-        
         return prompt
     
     @classmethod
@@ -489,6 +600,24 @@ class PlanService:
     ) -> str:
         """构建每日任务生成提示词"""
         total_minutes = int(daily_hours * 60)
+
+        learning_context = learning_context or {}
+
+        # 个性化偏好（来自学习计划/前端传入）
+        prefs = cls._normalize_preferences(learning_context.get("preferences"), goal="", domain=str(domain))
+        modality = prefs.get("modality", "mixed")
+        intensity = prefs.get("intensity", "medium")
+        goal_type = prefs.get("goal_type", "skill")
+
+        pace_hint = ""
+        pace = learning_context.get("pace") or {}
+        if isinstance(pace, dict):
+            if pace.get("missedDays"):
+                pace_hint += f"最近缺勤 {pace.get('missedDays')} 天，今天需要更可持续的安排；"
+            if pace.get("highCompletionStreak"):
+                pace_hint += f"近期连续高完成（{pace.get('highCompletionStreak')} 天），可以适当提高挑战；"
+            if pace.get("carryoverMinutes"):
+                pace_hint += f"有待补做任务约 {pace.get('carryoverMinutes')} 分钟，需优先安排；"
         
         # 分析学习状态
         state_analysis = ""
@@ -541,6 +670,8 @@ class PlanService:
 {"【阶段目标】" + phase_goals_str if phase_goals_str else ""}
 {"【学习状态】" + state_analysis if state_analysis else ""}
 {"【今日表现】" + today_analysis if today_analysis else ""}
+{"【节奏提示】" + pace_hint if pace_hint else ""}
+【个性化偏好】目标类型={goal_type}；媒介偏好={modality}；节奏强度={intensity}
 {context_str if context_str else ""}
 
 【核心要求】
@@ -550,6 +681,13 @@ class PlanService:
 4. 任务描述包含具体数量指标
 5. 总时长约{total_minutes}分钟
 6. 高强度和轻松任务穿插
+7. 按偏好调整结构：
+   - video：任务中包含“观看+笔记+复述+小练习”
+   - reading：任务中包含“精读+要点提炼+回忆复述”
+   - practice：任务中练习占比更高，并包含错题/复盘
+8. 按节奏强度调整：
+   - low：优先可完成、少而精；减少任务数或难度
+   - high：提高练习/挑战，加入小测验，但保留恢复/总结
 
 【任务描述示例】
 - ❌ 差："复习英语单词"

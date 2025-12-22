@@ -227,9 +227,9 @@ async def ensure_today_tasks(request: Request):
         p = await db.get_by_id("study_plans", plan_id_override)
         if p and p.get("openid") == openid and p.get("status") == "active":
             plan = p
-            logger.info(f"[tasks/ensure] 使用前端指定的计划")
+            logger.info("[tasks/ensure] 使用前端指定的计划")
         else:
-            logger.info(f"[tasks/ensure] 前端指定的计划不存在或不属于当前用户，将自动选择")
+            logger.info("[tasks/ensure] 前端指定的计划不存在或不属于当前用户，将自动选择")
 
     if not plan:
         plan = await plan_repo.get_active_plan(openid)
@@ -279,11 +279,11 @@ async def ensure_today_tasks(request: Request):
         logger.info(f"[tasks/ensure] date 范围查询结果: {len(existing)} 条任务")
 
     if existing:
-        logger.info(f"[tasks/ensure] 返回已存在的任务")
+        logger.info("[tasks/ensure] 返回已存在的任务")
         return {"success": True, "hasActivePlan": True, "isNew": False, "tasks": existing}
 
     # 生成任务（无则写库）
-    logger.info(f"[tasks/ensure] 开始生成今日任务")
+    logger.info("[tasks/ensure] 开始生成今日任务")
     domain = plan.get("domainName") or plan.get("domain") or ""
     daily_hours = float(plan.get("dailyHours") or 2)
 
@@ -292,10 +292,97 @@ async def ensure_today_tasks(request: Request):
     yesterday_stats = await _compute_yesterday_stats(openid, plan_id)
     learning_context = await _compute_learning_context(openid, plan_id, carryover_stats=yesterday_stats)
 
+    # 注入个性化偏好（若前端/计划已保存）
+    personalization = (plan.get("personalization") or plan.get("preferences") or {}) if isinstance(plan, dict) else {}
+    if isinstance(personalization, dict):
+        learning_context["preferences"] = personalization
+
+    # ========= 动态重排：把昨日未完成任务自动搬到今天 =========
+    total_minutes = max(20, int(daily_hours * 60))
+    carry_max_minutes = int(total_minutes * 0.6)  # 最多占用当天 60% 时长，避免“越欠越多”
+    carry_max_count = 3
+
+    y_start, y_end = _beijing_day_range(-1)
+    y_str = (y_start + timedelta(hours=8)).date().isoformat()
+    y_tasks = await db.query(
+        "plan_tasks",
+        {"openid": openid, "planId": plan_id, "dateStr": y_str},
+        limit=200,
+        order_by="order",
+        order_type="asc",
+    )
+    y_pending = []
+    for t in y_tasks:
+        if t.get("completed"):
+            continue
+        # 避免重复搬运
+        if t.get("carriedToDateStr") == today_str:
+            continue
+        y_pending.append(t)
+
+    # 按优先级排序（high > medium > low），同优先级按 order
+    priority_rank = {"high": 0, "medium": 1, "low": 2}
+    y_pending.sort(key=lambda x: (priority_rank.get(x.get("priority", "medium"), 1), int(x.get("order") or 0)))
+
+    carry_tasks = []
+    carry_minutes = 0
+    for t in y_pending:
+        if len(carry_tasks) >= carry_max_count:
+            break
+        dur = int(t.get("duration") or 30)
+        if carry_minutes + dur > carry_max_minutes:
+            continue
+        carry_tasks.append(t)
+        carry_minutes += dur
+
+    # 写入“搬运任务”
+    saved: List[Dict[str, Any]] = []
+    now = datetime.now(timezone.utc).isoformat()
+    order_cursor = 0
+    if carry_tasks:
+        logger.info(f"[tasks/ensure] 搬运昨日未完成任务: {len(carry_tasks)} 条, {carry_minutes} 分钟")
+        for t in carry_tasks:
+            doc = {
+                "planId": plan_id,
+                "openid": openid,
+                "phaseId": (current_phase or {}).get("id") or t.get("phaseId"),
+                "title": t.get("title") or "补做任务",
+                "description": t.get("description") or "",
+                "duration": int(t.get("duration", 30)),
+                "priority": t.get("priority", "medium"),
+                "type": t.get("type", "review"),
+                "completed": False,
+                "order": order_cursor,
+                "date": {"$date": today_start.isoformat()},
+                "dateStr": today_str,
+                "createdAt": {"$date": now},
+                "generatedBy": "carryover",
+                "calendarDate": today_str,
+                "carriedFromDateStr": y_str,
+                "originTaskId": str(t.get("_id") or t.get("id") or ""),
+            }
+            new_id = await db.add("plan_tasks", doc)
+            doc["_id"] = new_id
+            saved.append(doc)
+            order_cursor += 1
+
+            # 标记原任务已被搬运（避免反复搬运）
+            origin_id = t.get("_id") or t.get("id")
+            if origin_id:
+                await db.update_by_id("plan_tasks", str(origin_id), {"carriedToDateStr": today_str, "carriedAt": {"$date": now}})
+
+        # 给 AI 一个节奏提示
+        learning_context["pace"] = {
+            "carryoverMinutes": carry_minutes,
+            "missedDays": 1 if (yesterday_stats.get("completionRate", 0) == 0 and yesterday_stats.get("total", 0) > 0) else 0,
+        }
+
     # 使用 AI 生成今日任务（用户要求：不要快速规则生成）
+    remaining_minutes = max(0, total_minutes - carry_minutes)
+    adjusted_daily_hours = max(0.3, remaining_minutes / 60.0) if remaining_minutes else 0.3
     tasks = await PlanService.generate_daily_tasks(
         domain=domain,
-        daily_hours=daily_hours,
+        daily_hours=adjusted_daily_hours,
         current_phase=current_phase,
         learning_history=learning_history,
         today_stats=yesterday_stats,
@@ -315,8 +402,7 @@ async def ensure_today_tasks(request: Request):
         logger.info(f"[tasks/ensure] 生成期间已有其他请求写入，返回已存在的 {len(existing_after)} 条任务")
         return {"success": True, "hasActivePlan": True, "isNew": False, "tasks": existing_after}
 
-    saved: List[Dict[str, Any]] = []
-    now = datetime.now(timezone.utc).isoformat()
+    # 继续保存 AI 生成的任务（order 接在搬运任务之后）
     for i, t in enumerate(tasks):
         doc = {
             "planId": plan_id,  # 已确保是字符串格式
@@ -328,7 +414,7 @@ async def ensure_today_tasks(request: Request):
             "priority": t.get("priority", "medium"),
             "type": t.get("type", "learn"),
             "completed": False,
-            "order": i,
+            "order": order_cursor + i,
             "date": {"$date": today_start.isoformat()},
             "dateStr": today_str,  # 新增字段，用于精确查询
             "createdAt": {"$date": now},
@@ -584,6 +670,8 @@ async def scheduler_generate_all_tasks(request: Request):
     
     tomorrow_start, tomorrow_end = _beijing_day_range(1)
     tomorrow_str = (tomorrow_start + timedelta(hours=8)).date().isoformat()
+    today_start0, _ = _beijing_day_range(0)
+    today_str0 = (today_start0 + timedelta(hours=8)).date().isoformat()
     now = datetime.now(timezone.utc).isoformat()
     
     for plan in plans:
@@ -609,18 +697,88 @@ async def scheduler_generate_all_tasks(request: Request):
             # 获取当前阶段
             current_phase = _get_current_phase(plan)
             
-            # 生成任务
+            # ========= 动态重排：把今日未完成任务自动搬到明天（定时器版）=========
             domain = plan.get("domainName") or plan.get("domain", "")
             daily_hours = float(plan.get("dailyHours") or 2)
+
+            total_minutes = max(20, int(daily_hours * 60))
+            carry_max_minutes = int(total_minutes * 0.6)
+            carry_max_count = 3
+
+            today_tasks = await db.query(
+                "plan_tasks",
+                {"openid": openid, "planId": plan_id, "dateStr": today_str0},
+                limit=200,
+                order_by="order",
+                order_type="asc",
+            )
+            pending_today = []
+            for t in today_tasks:
+                if t.get("completed"):
+                    continue
+                if t.get("carriedToDateStr") == tomorrow_str:
+                    continue
+                pending_today.append(t)
+            priority_rank = {"high": 0, "medium": 1, "low": 2}
+            pending_today.sort(key=lambda x: (priority_rank.get(x.get("priority", "medium"), 1), int(x.get("order") or 0)))
+
+            carry_tasks = []
+            carry_minutes = 0
+            for t in pending_today:
+                if len(carry_tasks) >= carry_max_count:
+                    break
+                dur = int(t.get("duration") or 30)
+                if carry_minutes + dur > carry_max_minutes:
+                    continue
+                carry_tasks.append(t)
+                carry_minutes += dur
+
+            order_cursor = 0
+            for t in carry_tasks:
+                doc = {
+                    "planId": plan_id,
+                    "openid": openid,
+                    "phaseId": (current_phase or {}).get("id") or t.get("phaseId"),
+                    "title": t.get("title") or "补做任务",
+                    "description": t.get("description") or "",
+                    "duration": int(t.get("duration", 30)),
+                    "priority": t.get("priority", "medium"),
+                    "type": t.get("type", "review"),
+                    "completed": False,
+                    "order": order_cursor,
+                    "date": {"$date": tomorrow_start.isoformat()},
+                    "dateStr": tomorrow_str,
+                    "createdAt": {"$date": now},
+                    "generatedBy": "scheduler_carryover",
+                    "carriedFromDateStr": today_str0,
+                    "originTaskId": str(t.get("_id") or t.get("id") or ""),
+                }
+                await db.add("plan_tasks", doc)
+                order_cursor += 1
+                origin_id = t.get("_id") or t.get("id")
+                if origin_id:
+                    await db.update_by_id("plan_tasks", str(origin_id), {"carriedToDateStr": tomorrow_str, "carriedAt": {"$date": now}})
+
+            remaining_minutes = max(0, total_minutes - carry_minutes)
+            adjusted_daily_hours = max(0.3, remaining_minutes / 60.0) if remaining_minutes else 0.3
             
             # 获取历史数据
             learning_history = await _compute_learning_history(openid, plan_id)
-            
+
+            # 注入个性化偏好（若计划已保存）
+            personalization = plan.get("personalization") if isinstance(plan, dict) else {}
+            learning_context = {
+                "carryover": {"uncompletedTitles": [t.get("title") for t in pending_today[:5] if t.get("title")]},
+                "preferences": personalization if isinstance(personalization, dict) else {},
+                "pace": {"carryoverMinutes": carry_minutes},
+            }
+
             tasks = await PlanService.generate_daily_tasks(
                 domain=domain,
-                daily_hours=daily_hours,
+                daily_hours=adjusted_daily_hours,
                 current_phase=current_phase,
                 learning_history=learning_history,
+                learning_context=learning_context,
             )
             
             # 保存任务
@@ -635,7 +793,7 @@ async def scheduler_generate_all_tasks(request: Request):
                     "priority": t.get("priority", "medium"),
                     "type": t.get("type", "learn"),
                     "completed": False,
-                    "order": i,
+                    "order": order_cursor + i,
                     "date": {"$date": tomorrow_start.isoformat()},
                     "dateStr": tomorrow_str,
                     "createdAt": {"$date": now},

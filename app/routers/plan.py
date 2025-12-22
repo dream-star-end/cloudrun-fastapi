@@ -240,6 +240,7 @@ async def save_plan(request: Request):
     deadline = body.get("deadline") or plan_data.get("deadline")
     daily_hours = float(body.get("dailyHours") or body.get("daily_hours") or 2)
     current_level = body.get("currentLevel") or body.get("current_level") or "beginner"
+    personalization = body.get("personalization") or body.get("preferences") or plan_data.get("personalization") or plan_data.get("preferences") or None
 
     # 获取领域名称
     domain_names = {
@@ -275,6 +276,8 @@ async def save_plan(request: Request):
         "deadline": deadline,
         "dailyHours": daily_hours,
         "currentLevel": current_level,
+        # 用于“更强个性化画像/计划强度节奏”
+        "personalization": personalization if isinstance(personalization, dict) else {},
         "status": "active",
         "progress": 0,
         "todayProgress": 0,
@@ -775,6 +778,172 @@ async def get_achievement_rate(request: Request):
     }
 
 
+@router.get("/dashboard")
+async def get_dashboard(request: Request):
+    """
+    学习“变强仪表盘”数据：
+    - 知识点掌握度（基于错题 tags/掌握状态）
+    - 稳定性（最近3条错题是否已掌握的比例，近似口径）
+    - 投入时间（focus_records）
+    - 完成率（plan_tasks）
+    """
+    openid = _get_openid_from_request(request)
+    db = get_db()
+    plan_repo = PlanRepository(db)
+
+    plan = await plan_repo.get_active_plan(openid)
+    if not plan:
+        return {"success": True, "data": {"hasActivePlan": False}}
+
+    raw_id = plan.get("_id") or plan.get("id")
+    plan_id = str(raw_id) if raw_id else None
+    if not plan_id:
+        raise HTTPException(status_code=500, detail="学习计划缺少 _id")
+
+    today_start, _ = _beijing_day_range(0)
+    week_start = today_start - timedelta(days=7)
+    tomorrow_start, _ = _beijing_day_range(1)
+
+    def _datestr_from_date_field(date_val: Any) -> Optional[str]:
+        try:
+            dt = None
+            if isinstance(date_val, dict) and "$date" in date_val:
+                dt = datetime.fromisoformat(str(date_val["$date"]).replace("Z", "+00:00"))
+            elif isinstance(date_val, str):
+                dt = datetime.fromisoformat(date_val.replace("Z", "+00:00"))
+            elif isinstance(date_val, datetime):
+                dt = date_val
+            if not dt:
+                return None
+            if not dt.tzinfo:
+                dt = dt.replace(tzinfo=timezone.utc)
+            bj = dt.astimezone(timezone.utc) + timedelta(hours=8)
+            return bj.date().isoformat()
+        except Exception:
+            return None
+
+    # ====== 任务完成率（近7天）======
+    tasks = await db.query(
+        "plan_tasks",
+        {
+            "openid": openid,
+            "planId": plan_id,
+            "date": {"$gte": {"$date": week_start.isoformat()}, "$lt": {"$date": tomorrow_start.isoformat()}},
+        },
+        limit=2000,
+        order_by="date",
+        order_type="asc",
+    )
+    daily_task = {}
+    for t in tasks:
+        d = t.get("dateStr") or _datestr_from_date_field(t.get("date"))
+        if not d:
+            continue
+        if d not in daily_task:
+            daily_task[d] = {"dateStr": d, "total": 0, "completed": 0, "minutesPlanned": 0}
+        daily_task[d]["total"] += 1
+        daily_task[d]["minutesPlanned"] += int(t.get("duration") or 0)
+        if t.get("completed"):
+            daily_task[d]["completed"] += 1
+    daily_task_list = sorted(daily_task.values(), key=lambda x: x["dateStr"])
+    for x in daily_task_list:
+        x["completionRate"] = int(round((x["completed"] / x["total"]) * 100)) if x["total"] else 0
+
+    today_key = _beijing_date_str(0)
+    today_row = daily_task.get(today_key, {"dateStr": today_key, "total": 0, "completed": 0, "minutesPlanned": 0, "completionRate": 0})
+    total_7 = sum(x["total"] for x in daily_task_list)
+    completed_7 = sum(x["completed"] for x in daily_task_list)
+    completion_7 = int(round((completed_7 / total_7) * 100)) if total_7 else 0
+
+    # ====== 投入时间（focus_records 近7天）======
+    focus_records = await db.query(
+        "focus_records",
+        {"openid": openid, "date": {"$gte": {"$date": week_start.isoformat()}, "$lt": {"$date": tomorrow_start.isoformat()}}},
+        limit=2000,
+        order_by="date",
+        order_type="asc",
+    )
+    daily_focus = {}
+    for r in focus_records:
+        d = _datestr_from_date_field(r.get("date"))
+        if not d:
+            continue
+        if d not in daily_focus:
+            daily_focus[d] = {"dateStr": d, "minutes": 0, "count": 0}
+        daily_focus[d]["minutes"] += int(r.get("duration") or 0)
+        daily_focus[d]["count"] += 1
+    daily_focus_list = sorted(daily_focus.values(), key=lambda x: x["dateStr"])
+    today_focus = daily_focus.get(today_key, {"minutes": 0, "count": 0})
+    week_focus_minutes = sum(x["minutes"] for x in daily_focus_list)
+
+    # ====== 知识点掌握度（错题 tags 近似）======
+    mistakes = await db.query(
+        "mistakes",
+        {"openid": openid},
+        limit=1000,
+        order_by="createdAt",
+        order_type="desc",
+    )
+    by_tag: Dict[str, List[Dict[str, Any]]] = {}
+    for m in mistakes:
+        tags = m.get("tags") or []
+        if not isinstance(tags, list) or not tags:
+            # fallback：用 category 作为弱标签
+            cat = str(m.get("category") or "").strip()
+            tags = [cat] if cat else []
+        for t in tags:
+            tag = str(t).strip()
+            if not tag:
+                continue
+            by_tag.setdefault(tag, []).append(m)
+
+    tag_rows = []
+    for tag, ms in by_tag.items():
+        total = len(ms)
+        mastered = len([x for x in ms if x.get("mastered")])
+        last3 = ms[:3]
+        stability = (len([x for x in last3 if x.get("mastered")]) / 3.0) if len(last3) >= 3 else (mastered / total if total else 0.0)
+        tag_rows.append(
+            {
+                "tag": tag,
+                "total": total,
+                "mastered": mastered,
+                "mastery": round(mastered / total, 3) if total else 0.0,
+                "stability": round(stability, 3),
+            }
+        )
+    # 选：先看未掌握多的，再看总量
+    tag_rows.sort(key=lambda x: (-(x["total"] - x["mastered"]), -x["total"]))
+    top_tags = tag_rows[:8]
+    overall_total = sum(x["total"] for x in tag_rows)
+    overall_mastered = sum(x["mastered"] for x in tag_rows)
+    overall_mastery = round(overall_mastered / overall_total, 3) if overall_total else 0.0
+
+    return {
+        "success": True,
+        "data": {
+            "hasActivePlan": True,
+            "planId": plan_id,
+            "dateStr": today_key,
+            "tasks": {
+                "today": today_row,
+                "last7CompletionRate": completion_7,
+                "daily": daily_task_list,
+            },
+            "focus": {
+                "todayMinutes": int(today_focus.get("minutes") or 0),
+                "todayCount": int(today_focus.get("count") or 0),
+                "last7Minutes": int(week_focus_minutes),
+                "daily": daily_focus_list,
+            },
+            "knowledge": {
+                "overallMastery": overall_mastery,
+                "top": top_tags,
+            },
+        },
+    }
+
+
 # ==================== 明日任务 API ====================
 
 
@@ -824,24 +993,114 @@ async def generate_tomorrow_tasks(request: Request):
     today_total = len(today_tasks)
     completion_rate = int(round((today_completed / today_total) * 100)) if today_total else 0
 
+    # ========= 动态重排：把今日未完成任务自动搬到明天 =========
+    total_minutes = max(20, int(float(plan.get("dailyHours") or 2) * 60))
+    carry_max_minutes = int(total_minutes * 0.6)
+    carry_max_count = 3
+
+    pending_today = []
+    for t in today_tasks:
+        if t.get("completed"):
+            continue
+        if t.get("carriedToDateStr") == tomorrow_str:
+            continue
+        pending_today.append(t)
+
+    priority_rank = {"high": 0, "medium": 1, "low": 2}
+    pending_today.sort(key=lambda x: (priority_rank.get(x.get("priority", "medium"), 1), int(x.get("order") or 0)))
+
+    carry_tasks = []
+    carry_minutes = 0
+    for t in pending_today:
+        if len(carry_tasks) >= carry_max_count:
+            break
+        dur = int(t.get("duration") or 30)
+        if carry_minutes + dur > carry_max_minutes:
+            continue
+        carry_tasks.append(t)
+        carry_minutes += dur
+
+    # 组装 learning_context（错题 + 续做 + 个性化偏好 + 节奏）
+    mistakes = await db.query(
+        "mistakes",
+        {"openid": openid, "mastered": False},
+        limit=5,
+        order_by="createdAt",
+        order_type="desc",
+    )
+    simplified_mistakes = []
+    for m in mistakes:
+        simplified_mistakes.append(
+            {
+                "id": m.get("_id") or m.get("id"),
+                "topic": (m.get("category") or "") if m.get("category") else None,
+                "question": m.get("question") or "",
+                "tags": m.get("tags") or [],
+            }
+        )
+    personalization = plan.get("personalization") if isinstance(plan, dict) else {}
+    learning_context = {
+        "carryover": {"uncompletedTitles": [t.get("title") for t in pending_today[:5] if t.get("title")]},
+        "mistakes": simplified_mistakes,
+        "preferences": personalization if isinstance(personalization, dict) else {},
+        "pace": {
+            "carryoverMinutes": carry_minutes,
+            "missedDays": 1 if (completion_rate == 0 and today_total > 0) else 0,
+            "highCompletionStreak": 1 if (completion_rate >= 95 and today_total > 0) else 0,
+        },
+    }
+
     # 获取当前阶段
     current_phase = _get_current_phase(plan)
 
-    # 生成任务
+    # 生成任务（先写入搬运任务，再用剩余时间生成新任务）
     domain = plan.get("domainName") or plan.get("domain", "")
-    daily_hours = float(plan.get("dailyHours") or 2)
+
+    saved_tasks: List[Dict[str, Any]] = []
+    now = datetime.now(timezone.utc).isoformat()
+    order_cursor = 0
+
+    if carry_tasks:
+        for t in carry_tasks:
+            doc = {
+                "planId": plan_id,
+                "openid": openid,
+                "phaseId": (current_phase or {}).get("id") or t.get("phaseId"),
+                "title": t.get("title") or "补做任务",
+                "description": t.get("description") or "",
+                "duration": int(t.get("duration", 30)),
+                "priority": t.get("priority", "medium"),
+                "type": t.get("type", "review"),
+                "completed": False,
+                "order": order_cursor,
+                "date": {"$date": tomorrow_start.isoformat()},
+                "dateStr": tomorrow_str,
+                "createdAt": {"$date": now},
+                "generatedBy": "carryover",
+                "carriedFromDateStr": today_str,
+                "originTaskId": str(t.get("_id") or t.get("id") or ""),
+            }
+            new_id = await db.add("plan_tasks", doc)
+            doc["_id"] = new_id
+            saved_tasks.append(doc)
+            order_cursor += 1
+
+            origin_id = t.get("_id") or t.get("id")
+            if origin_id:
+                await db.update_by_id("plan_tasks", str(origin_id), {"carriedToDateStr": tomorrow_str, "carriedAt": {"$date": now}})
+
+    remaining_minutes = max(0, total_minutes - carry_minutes)
+    adjusted_daily_hours = max(0.3, remaining_minutes / 60.0) if remaining_minutes else 0.3
 
     tasks = await PlanService.generate_daily_tasks(
         domain=domain,
-        daily_hours=daily_hours,
+        daily_hours=adjusted_daily_hours,
         current_phase=current_phase,
         learning_history={"avgCompletionRate": completion_rate},
         today_stats={"completionRate": completion_rate},
+        learning_context=learning_context,
     )
 
-    # 保存任务
-    saved_tasks: List[Dict[str, Any]] = []
-    now = datetime.now(timezone.utc).isoformat()
     for i, t in enumerate(tasks):
         doc = {
             "planId": plan_id,
@@ -853,7 +1112,7 @@ async def generate_tomorrow_tasks(request: Request):
             "priority": t.get("priority", "medium"),
             "type": t.get("type", "learn"),
             "completed": False,
-            "order": i,
+            "order": order_cursor + i,
             "date": {"$date": tomorrow_start.isoformat()},
             "dateStr": tomorrow_str,
             "createdAt": {"$date": now},
@@ -941,12 +1200,104 @@ async def generate_tomorrow_tasks_stream(request: Request):
     today_total = len(today_tasks)
     completion_rate = int(round((today_completed / today_total) * 100)) if today_total else 0
 
-    # 获取当前阶段
+    # ========= 动态重排：把今日未完成任务自动搬到明天（流式版也一致） =========
+    total_minutes = max(20, int(float(plan.get("dailyHours") or 2) * 60))
+    carry_max_minutes = int(total_minutes * 0.6)
+    carry_max_count = 3
+
+    pending_today = []
+    for t in today_tasks:
+        if t.get("completed"):
+            continue
+        if t.get("carriedToDateStr") == tomorrow_str:
+            continue
+        pending_today.append(t)
+
+    priority_rank = {"high": 0, "medium": 1, "low": 2}
+    pending_today.sort(key=lambda x: (priority_rank.get(x.get("priority", "medium"), 1), int(x.get("order") or 0)))
+
+    carry_tasks = []
+    carry_minutes = 0
+    for t in pending_today:
+        if len(carry_tasks) >= carry_max_count:
+            break
+        dur = int(t.get("duration") or 30)
+        if carry_minutes + dur > carry_max_minutes:
+            continue
+        carry_tasks.append(t)
+        carry_minutes += dur
+
+    # learning_context（错题 + 续做 + 个性化偏好 + 节奏）
+    mistakes = await db.query(
+        "mistakes",
+        {"openid": openid, "mastered": False},
+        limit=5,
+        order_by="createdAt",
+        order_type="desc",
+    )
+    simplified_mistakes = []
+    for m in mistakes:
+        simplified_mistakes.append(
+            {
+                "id": m.get("_id") or m.get("id"),
+                "topic": (m.get("category") or "") if m.get("category") else None,
+                "question": m.get("question") or "",
+                "tags": m.get("tags") or [],
+            }
+        )
+    personalization = plan.get("personalization") if isinstance(plan, dict) else {}
+    learning_context = {
+        "carryover": {"uncompletedTitles": [t.get("title") for t in pending_today[:5] if t.get("title")]},
+        "mistakes": simplified_mistakes,
+        "preferences": personalization if isinstance(personalization, dict) else {},
+        "pace": {
+            "carryoverMinutes": carry_minutes,
+            "missedDays": 1 if (completion_rate == 0 and today_total > 0) else 0,
+            "highCompletionStreak": 1 if (completion_rate >= 95 and today_total > 0) else 0,
+        },
+    }
+
+    # 获取当前阶段（流式版需要在搬运任务写入前可用）
     current_phase = _get_current_phase(plan)
+
+    carry_saved_tasks: List[Dict[str, Any]] = []
+    order_offset = 0
+    now = datetime.now(timezone.utc).isoformat()
+    if carry_tasks:
+        for t in carry_tasks:
+            doc = {
+                "planId": plan_id,
+                "openid": openid,
+                "phaseId": (current_phase or {}).get("id") or t.get("phaseId"),
+                "title": t.get("title") or "补做任务",
+                "description": t.get("description") or "",
+                "duration": int(t.get("duration", 30)),
+                "priority": t.get("priority", "medium"),
+                "type": t.get("type", "review"),
+                "completed": False,
+                "order": order_offset,
+                "date": {"$date": tomorrow_start.isoformat()},
+                "dateStr": tomorrow_str,
+                "createdAt": {"$date": now},
+                "generatedBy": "carryover",
+                "carriedFromDateStr": today_str,
+                "originTaskId": str(t.get("_id") or t.get("id") or ""),
+            }
+            new_id = await db.add("plan_tasks", doc)
+            doc["_id"] = new_id
+            carry_saved_tasks.append(doc)
+            order_offset += 1
+
+            origin_id = t.get("_id") or t.get("id")
+            if origin_id:
+                await db.update_by_id("plan_tasks", str(origin_id), {"carriedToDateStr": tomorrow_str, "carriedAt": {"$date": now}})
+
+    remaining_minutes = max(0, total_minutes - carry_minutes)
+    adjusted_daily_hours = max(0.3, remaining_minutes / 60.0) if remaining_minutes else 0.3
 
     # 生成任务参数
     domain = plan.get("domainName") or plan.get("domain", "")
-    daily_hours = float(plan.get("dailyHours") or 2)
+    daily_hours = adjusted_daily_hours
 
     async def generate():
         full_content = ""
@@ -963,6 +1314,7 @@ async def generate_tomorrow_tasks_stream(request: Request):
                 current_phase=current_phase,
                 learning_history={"avgCompletionRate": completion_rate},
                 today_stats={"completionRate": completion_rate},
+                learning_context=learning_context,
             ):
                 full_content += chunk
                 yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
@@ -979,7 +1331,7 @@ async def generate_tomorrow_tasks_stream(request: Request):
                     yield f"data: {json.dumps({'type': 'progress', 'message': '正在保存任务...'})}\n\n"
                     
                     # 保存任务
-                    saved_tasks: List[Dict[str, Any]] = []
+                    saved_tasks: List[Dict[str, Any]] = list(carry_saved_tasks)
                     now = datetime.now(timezone.utc).isoformat()
                     for i, t in enumerate(tasks):
                         doc = {
@@ -992,7 +1344,7 @@ async def generate_tomorrow_tasks_stream(request: Request):
                             "priority": t.get("priority", "medium"),
                             "type": t.get("type", "learn"),
                             "completed": False,
-                            "order": i,
+                            "order": order_offset + i,
                             "date": {"$date": tomorrow_start.isoformat()},
                             "dateStr": tomorrow_str,
                             "createdAt": {"$date": now},
