@@ -598,104 +598,25 @@ async def generate_phase_detail_stream(request: Request):
         raise HTTPException(status_code=404, detail="阶段不存在")
 
     async def generate():
-        full_content = ""
-        
+        """使用 JSON 模式生成阶段详情（更可靠）"""
         try:
             yield f"data: {json.dumps({'type': 'progress', 'message': '正在分析阶段目标...'})}\n\n"
             
-            yield f"data: {json.dumps({'type': 'progress', 'message': '正在生成阶段详情...'})}\n\n"
+            yield f"data: {json.dumps({'type': 'progress', 'message': '正在生成阶段详情（约需30-60秒）...'})}\n\n"
             
-            # 流式调用 AI
-            async for chunk in PlanService.generate_phase_detail_stream(
+            # 使用 JSON 模式调用 AI（非流式，但更可靠）
+            result = await PlanService.generate_phase_detail(
                 phase_name=phase.get("name", ""),
                 phase_goals=phase.get("goals", []),
                 domain=plan.get("domainName") or plan.get("domain", ""),
                 duration=phase.get("duration", "1周"),
-            ):
-                full_content += chunk
-                yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
+            )
             
-            yield f"data: {json.dumps({'type': 'progress', 'message': '正在解析阶段详情...'})}\n\n"
-            
-            # 记录 AI 原始输出（用于调试）
-            logger.info(f"[phase-detail/stream] AI 原始输出长度: {len(full_content)}")
-            logger.debug(f"[phase-detail/stream] AI 原始输出: {full_content[:2000]}...")
-            
-            # 解析 JSON - 尝试多种匹配方式
-            json_match = re.search(r'\{[\s\S]*\}', full_content)
-            detail = None
-            parse_error = None
-            
-            if json_match:
-                json_str = json_match.group()
+            if result.get("success") and result.get("detail"):
+                detail = result["detail"]
                 
-                # 尝试直接解析
-                try:
-                    detail = json.loads(json_str)
-                except json.JSONDecodeError as je:
-                    parse_error = je
-                    logger.warning(f"[phase-detail/stream] 直接解析失败: {je}")
-                    logger.warning(f"[phase-detail/stream] JSON 字符串 (前500字符): {json_str[:500]}")
-                    
-                    # 尝试修复常见问题：去除尾部多余内容
-                    try:
-                        # 找到最后一个有效的 } 位置
-                        brace_count = 0
-                        last_valid_pos = -1
-                        for i, c in enumerate(json_str):
-                            if c == '{':
-                                brace_count += 1
-                            elif c == '}':
-                                brace_count -= 1
-                                if brace_count == 0:
-                                    last_valid_pos = i
-                                    break
-                        
-                        if last_valid_pos > 0:
-                            fixed_json = json_str[:last_valid_pos + 1]
-                            detail = json.loads(fixed_json)
-                            logger.info("[phase-detail/stream] JSON 修复成功（截断尾部）")
-                            parse_error = None
-                    except json.JSONDecodeError as je2:
-                        logger.warning(f"[phase-detail/stream] JSON 修复失败: {je2}")
-                        
-                        # 尝试使用更宽松的解析：提取关键字段
-                        try:
-                            detail = {
-                                "key_points": [],
-                                "learning_resources": [],
-                                "milestones": [],
-                                "practice_suggestions": []
-                            }
-                            
-                            # 尝试提取 key_points
-                            kp_match = re.search(r'"key_points"\s*:\s*\[(.*?)\]', json_str, re.DOTALL)
-                            if kp_match:
-                                kp_str = '[' + kp_match.group(1) + ']'
-                                try:
-                                    detail["key_points"] = json.loads(kp_str)
-                                except (json.JSONDecodeError, ValueError):
-                                    pass
-                            
-                            # 尝试提取 practice_suggestions
-                            ps_match = re.search(r'"practice_suggestions"\s*:\s*\[(.*?)\]', json_str, re.DOTALL)
-                            if ps_match:
-                                ps_str = '[' + ps_match.group(1) + ']'
-                                try:
-                                    detail["practice_suggestions"] = json.loads(ps_str)
-                                except (json.JSONDecodeError, ValueError):
-                                    pass
-                            
-                            if detail["key_points"] or detail["practice_suggestions"]:
-                                logger.info("[phase-detail/stream] 部分字段提取成功")
-                                parse_error = None
-                            else:
-                                detail = None
-                        except Exception as e3:
-                            logger.error(f"[phase-detail/stream] 字段提取失败: {e3}")
-                            detail = None
-            
-            if detail:
+                yield f"data: {json.dumps({'type': 'progress', 'message': '正在保存阶段详情...'})}\n\n"
+                
                 # 更新阶段信息
                 updated_phase = {
                     **phase,
@@ -720,20 +641,11 @@ async def generate_phase_detail_stream(request: Request):
                     logger.error(f"[phase-detail/stream] 数据库更新失败: {db_err}")
                 
                 yield f"data: {json.dumps({'type': 'result', 'success': True, 'phaseDetail': updated_phase})}\n\n"
-            elif parse_error:
-                logger.error(f"[phase-detail/stream] JSON 解析最终失败: {parse_error}")
-                # 即使解析失败，也返回基本的阶段信息
-                fallback_phase = {
-                    **phase,
-                    "status": "completed",
-                    "keyPoints": [],
-                    "resources": [],
-                    "milestone": "",
-                    "parseError": True,
-                }
-                yield f"data: {json.dumps({'type': 'result', 'success': True, 'phaseDetail': fallback_phase, 'warning': 'AI输出格式异常，部分内容可能丢失'})}\n\n"
             else:
-                logger.error("[phase-detail/stream] AI 响应中未找到 JSON")
+                # AI 调用失败，返回基本阶段信息
+                error_msg = result.get("error", "生成失败")
+                logger.error(f"[phase-detail/stream] AI 生成失败: {error_msg}")
+                
                 fallback_phase = {
                     **phase,
                     "status": "completed",
@@ -741,11 +653,19 @@ async def generate_phase_detail_stream(request: Request):
                     "resources": [],
                     "milestone": "",
                 }
-                yield f"data: {json.dumps({'type': 'result', 'success': True, 'phaseDetail': fallback_phase, 'warning': '生成格式异常'})}\n\n"
+                yield f"data: {json.dumps({'type': 'result', 'success': True, 'phaseDetail': fallback_phase, 'warning': error_msg})}\n\n"
                 
         except Exception as e:
             logger.error(f"[phase-detail/stream] 异常: {type(e).__name__}: {str(e)}", exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+            # 即使出错也返回基本结果，不阻塞流程
+            fallback_phase = {
+                **phase,
+                "status": "completed",
+                "keyPoints": [],
+                "resources": [],
+                "milestone": "",
+            }
+            yield f"data: {json.dumps({'type': 'result', 'success': True, 'phaseDetail': fallback_phase, 'warning': str(e)})}\n\n"
         
         yield "data: [DONE]\n\n"
     

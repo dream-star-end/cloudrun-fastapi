@@ -118,6 +118,93 @@ class AIService:
             raise ValueError(f"AI 服务网络错误: {str(e)}")
     
     @classmethod
+    async def chat_json(
+        cls,
+        messages: List[Dict],
+        model_type: str = "text",
+        temperature: float = 0.5,
+        max_tokens: int = 2000,
+        timeout: float = 180.0,
+    ) -> Dict:
+        """
+        JSON 模式 AI 对话 - 使用大模型原生 JSON 能力
+        
+        Args:
+            messages: 对话历史
+            model_type: 模型类型 (text/vision/longtext)
+            temperature: 生成温度（JSON 模式建议用较低温度）
+            max_tokens: 最大生成长度
+            timeout: 超时时间（秒），默认 180 秒
+        
+        Returns:
+            解析后的 JSON 字典
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        config = AI_MODELS.get(model_type, AI_MODELS["text"])
+        
+        if not config.get('api_key'):
+            logger.error(f"[AIService] {model_type} 模型 API Key 未配置")
+            raise ValueError(f"AI 服务配置错误：{model_type} 模型 API Key 未设置")
+        
+        # 对于 JSON 模式，不需要系统提示词（避免干扰 JSON 输出）
+        full_messages = messages.copy()
+        
+        logger.info(f"[AIService] 开始 JSON 模式 AI 调用: model={config['model']}, timeout={timeout}s")
+        
+        try:
+            async with httpx.AsyncClient(**get_http_client_kwargs(timeout)) as client:
+                request_body = {
+                    "model": config["model"],
+                    "messages": full_messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "stream": False,
+                    "response_format": {"type": "json_object"},  # 启用 JSON 模式
+                }
+                
+                response = await client.post(
+                    f"{config['base_url']}/chat/completions",
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {config['api_key']}",
+                    },
+                    json=request_body,
+                )
+                
+                logger.info(f"[AIService] JSON 模式响应状态码: {response.status_code}")
+                
+                if response.status_code != 200:
+                    error_text = response.text[:500] if response.text else "无响应内容"
+                    logger.error(f"[AIService] AI API 错误: status={response.status_code}, body={error_text}")
+                    raise ValueError(f"AI API 错误 ({response.status_code})")
+                
+                data = response.json()
+                
+                if data.get("choices") and data["choices"][0].get("message"):
+                    content = data["choices"][0]["message"]["content"]
+                    logger.info(f"[AIService] JSON 模式调用成功, 响应长度: {len(content)}")
+                    
+                    # 解析 JSON
+                    try:
+                        result = json.loads(content)
+                        return result
+                    except json.JSONDecodeError as je:
+                        logger.error(f"[AIService] JSON 解析失败: {je}, 内容: {content[:500]}")
+                        raise ValueError(f"AI 返回的 JSON 格式无效: {je}")
+                
+                logger.error(f"[AIService] AI 返回格式异常")
+                raise ValueError("AI 返回格式错误")
+                
+        except httpx.TimeoutException as e:
+            logger.error(f"[AIService] JSON 模式 AI 调用超时: {e}")
+            raise ValueError(f"AI 服务响应超时（{timeout}秒），请稍后重试")
+        except httpx.RequestError as e:
+            logger.error(f"[AIService] JSON 模式网络请求错误: {type(e).__name__}: {e}")
+            raise ValueError(f"AI 服务网络错误: {str(e)}")
+    
+    @classmethod
     async def chat_stream(
         cls,
         messages: List[Dict],

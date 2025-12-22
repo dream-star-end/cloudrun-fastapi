@@ -449,7 +449,7 @@ JSON格式如下：
         duration: str,
     ) -> Dict:
         """
-        生成学习阶段的详细内容（非流式）
+        生成学习阶段的详细内容（使用 JSON 模式，更可靠）
         
         Args:
             phase_name: 阶段名称
@@ -460,51 +460,28 @@ JSON格式如下：
         Returns:
             阶段详情字典
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         prompt = cls._build_phase_detail_prompt(phase_name, phase_goals, domain, duration)
         messages = [{"role": "user", "content": prompt}]
         
         try:
-            response = await AIService.chat(
+            # 使用 JSON 模式，超时设为 180 秒
+            detail = await AIService.chat_json(
                 messages=messages,
                 model_type="text",
-                temperature=0.7,
+                temperature=0.5,  # JSON 模式用较低温度更稳定
                 max_tokens=2000,
+                timeout=180.0,
             )
             
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return {"success": True, "detail": json.loads(json_match.group())}
-            
-            return {"success": False, "error": "生成失败"}
+            logger.info(f"[PlanService] 阶段详情生成成功: {phase_name}")
+            return {"success": True, "detail": detail}
             
         except Exception as e:
+            logger.error(f"[PlanService] 阶段详情生成失败: {e}")
             return {"success": False, "error": str(e)}
-    
-    @classmethod
-    async def generate_phase_detail_stream(
-        cls,
-        phase_name: str,
-        phase_goals: List[str],
-        domain: str,
-        duration: str,
-    ):
-        """
-        生成学习阶段的详细内容（流式）
-        
-        Yields:
-            AI 响应内容片段
-        """
-        from typing import AsyncGenerator
-        prompt = cls._build_phase_detail_prompt(phase_name, phase_goals, domain, duration)
-        messages = [{"role": "user", "content": prompt}]
-        
-        async for chunk in AIService.chat_stream(
-            messages=messages,
-            model_type="text",
-            temperature=0.7,
-            max_tokens=2000,
-        ):
-            yield chunk
     
     @classmethod
     def _build_plan_prompt(
