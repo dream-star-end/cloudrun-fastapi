@@ -19,6 +19,7 @@ from app.routers.search import router as search_router
 from app.routers.plan import router as plan_router
 from app.routers.tasks import router as tasks_router
 from app.routers.agent import router as agent_router
+from app.routers.mistakes import router as mistakes_router
 
 
 @asynccontextmanager
@@ -81,6 +82,7 @@ app.include_router(search_router)
 app.include_router(plan_router)
 app.include_router(tasks_router)
 app.include_router(agent_router)  # AI Agent 路由
+app.include_router(mistakes_router)  # 错题本 CRUD（替代云函数）
 
 
 # ==================== 基础端点 ====================
