@@ -185,3 +185,64 @@ class Document(BaseModel):
     createdAt: Optional[datetime] = None
     updatedAt: Optional[datetime] = None
 
+
+# ==================== 学习社区相关模型 ====================
+
+class SharedPlanAuthor(BaseModel):
+    """分享计划的作者信息"""
+    openid: str
+    nickName: str = ""
+    avatarUrl: str = ""
+
+
+class SharedPlan(BaseModel):
+    """分享的学习计划 - 对应 shared_plans 集合"""
+    _id: Optional[str] = None
+    openid: str  # 分享者的 openid
+    originalPlanId: str  # 原计划 ID
+    title: str  # 分享标题
+    description: str = ""  # 分享说明
+    # 计划快照（复制时使用）
+    goal: str = ""
+    domain: str = ""
+    domainName: str = ""
+    dailyHours: float = 2.0
+    currentLevel: str = "beginner"
+    totalDuration: str = ""
+    phases: List[Dict[str, Any]] = []
+    # 作者信息快照
+    author: SharedPlanAuthor = None
+    # 统计数据
+    likeCount: int = 0
+    commentCount: int = 0
+    useCount: int = 0  # 被使用次数
+    viewCount: int = 0  # 查看次数
+    # 状态
+    status: str = "active"  # active, hidden, deleted
+    publishedAt: Optional[datetime] = None
+    createdAt: Optional[datetime] = None
+    updatedAt: Optional[datetime] = None
+
+
+class CommunityComment(BaseModel):
+    """社区评论 - 对应 community_comments 集合"""
+    _id: Optional[str] = None
+    planId: str  # 分享计划 ID (shared_plans._id)
+    openid: str  # 评论者 openid
+    content: str
+    # 作者信息快照
+    author: SharedPlanAuthor = None
+    # 回复相关（可选，支持楼中楼）
+    replyTo: Optional[str] = None  # 回复的评论 ID
+    replyToUser: Optional[str] = None  # 回复的用户 openid
+    # 状态
+    status: str = "active"  # active, hidden, deleted
+    createdAt: Optional[datetime] = None
+
+
+class CommunityLike(BaseModel):
+    """社区点赞 - 对应 community_likes 集合"""
+    _id: Optional[str] = None
+    planId: str  # 分享计划 ID (shared_plans._id)
+    openid: str  # 点赞者 openid
+    createdAt: Optional[datetime] = None

@@ -20,6 +20,7 @@ from app.routers.plan import router as plan_router
 from app.routers.tasks import router as tasks_router
 from app.routers.agent import router as agent_router
 from app.routers.mistakes import router as mistakes_router
+from app.routers.community import router as community_router
 
 
 @asynccontextmanager
@@ -83,6 +84,7 @@ app.include_router(plan_router)
 app.include_router(tasks_router)
 app.include_router(agent_router)  # AI Agent 路由
 app.include_router(mistakes_router)  # 错题本 CRUD（替代云函数）
+app.include_router(community_router)  # 学习社区路由
 
 
 # ==================== 基础端点 ====================
@@ -209,6 +211,37 @@ async def api_info():
                 "path": "/api/mistakes/review",
                 "methods": ["POST"],
                 "description": "生成错题复习题目",
+            },
+            # 学习社区
+            "community_stats": {
+                "path": "/api/community/stats",
+                "methods": ["GET"],
+                "description": "社区统计数据",
+            },
+            "community_plans": {
+                "path": "/api/community/plans/list",
+                "methods": ["POST"],
+                "description": "社区计划列表（热门/最新/我的分享）",
+            },
+            "community_share": {
+                "path": "/api/community/share",
+                "methods": ["POST"],
+                "description": "分享学习计划到社区",
+            },
+            "community_like": {
+                "path": "/api/community/like",
+                "methods": ["POST"],
+                "description": "点赞/取消点赞",
+            },
+            "community_comment": {
+                "path": "/api/community/comment",
+                "methods": ["POST"],
+                "description": "添加评论",
+            },
+            "community_use": {
+                "path": "/api/community/use",
+                "methods": ["POST"],
+                "description": "使用（复制）社区计划",
             },
         },
     }
