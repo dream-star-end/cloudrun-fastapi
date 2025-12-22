@@ -179,6 +179,37 @@ async def api_info():
                 "methods": ["POST"],
                 "description": "错题分析",
             },
+            # 错题本（云托管替代云函数）
+            "mistakes_list": {
+                "path": "/api/mistakes/list",
+                "methods": ["POST"],
+                "description": "错题列表（分页/筛选）",
+            },
+            "mistakes_stats": {
+                "path": "/api/mistakes/stats",
+                "methods": ["GET"],
+                "description": "错题统计（总数/待复习/已掌握）",
+            },
+            "mistakes_add": {
+                "path": "/api/mistakes/add",
+                "methods": ["POST"],
+                "description": "添加错题（含自动标签）",
+            },
+            "mistakes_update": {
+                "path": "/api/mistakes/update",
+                "methods": ["POST"],
+                "description": "更新错题（含复习+1/标记掌握）",
+            },
+            "mistakes_delete": {
+                "path": "/api/mistakes/delete",
+                "methods": ["POST"],
+                "description": "删除错题",
+            },
+            "mistakes_review": {
+                "path": "/api/mistakes/review",
+                "methods": ["POST"],
+                "description": "生成错题复习题目",
+            },
         },
     }
 
