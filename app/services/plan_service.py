@@ -406,26 +406,39 @@ class PlanService:
         duration: str,
     ) -> str:
         """构建阶段详情生成提示词"""
-        return f"""请为以下学习阶段生成详细的学习内容和计划：
+        goals_text = chr(10).join(['- ' + g for g in phase_goals]) if phase_goals else "- 完成本阶段学习"
+        
+        return f"""请为以下学习阶段生成详细的学习内容。
 
 【阶段名称】{phase_name}
 【学习领域】{domain}
 【阶段时长】{duration}
 【阶段目标】
-{chr(10).join(['- ' + g for g in phase_goals])}
+{goals_text}
 
-请返回JSON格式（只返回JSON）：
+要求：
+1. 只返回一个有效的JSON对象，不要包含任何其他文字
+2. JSON必须是完整的，确保所有括号正确闭合
+3. 字符串中不要包含未转义的特殊字符
+
+JSON格式如下：
+```json
 {{
-    "key_points": ["本阶段重点知识点1", "知识点2", "知识点3", ...],
+    "key_points": ["知识点1", "知识点2", "知识点3"],
     "learning_resources": [
-        {{"type": "video/book/article", "name": "资源名称", "description": "资源描述"}}
+        {{"type": "video", "name": "资源名称"}},
+        {{"type": "book", "name": "资源名称"}}
     ],
     "practice_suggestions": ["练习建议1", "练习建议2"],
     "milestones": [
-        {{"week": 1, "goal": "第一周目标", "tasks": ["任务1", "任务2"]}}
+        {{"week": 1, "goal": "目标描述"}}
     ],
-    "tips": ["学习小贴士1", "小贴士2"]
-}}"""
+    "tips": ["学习小贴士"]
+}}
+```
+
+请生成3-5个key_points，2-3个learning_resources，2-3个practice_suggestions。
+直接输出JSON，不要有任何前缀或后缀文字。"""
 
     @classmethod
     async def generate_phase_detail(
