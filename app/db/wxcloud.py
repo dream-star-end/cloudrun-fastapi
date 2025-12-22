@@ -950,3 +950,152 @@ class PlanRepository:
             "taskCompletionRate": progress.get("progress", 0),
         }
 
+
+class DocumentRepository:
+    """文档数据仓库 - 用于文档伴读功能"""
+    
+    def __init__(self, db: Optional[WxCloudDB] = None):
+        self.db = db or get_db()
+    
+    async def get_documents(
+        self,
+        openid: str,
+        doc_type: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """获取用户的文档列表
+        
+        Args:
+            openid: 用户ID
+            doc_type: 文档类型筛选 (pdf/doc/docx/txt/md)
+            status: 状态筛选 (pending/processing/ready/error)
+            limit: 返回数量限制
+        
+        Returns:
+            文档列表
+        """
+        query: Dict[str, Any] = {"openid": openid}
+        if doc_type:
+            query["type"] = doc_type
+        if status:
+            query["status"] = status
+        
+        return await self.db.query(
+            "documents",
+            query,
+            limit=limit,
+            order_by="createdAt",
+            order_type="desc",
+        )
+    
+    async def get_document_by_id(
+        self,
+        doc_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """根据ID获取文档"""
+        return await self.db.get_by_id("documents", doc_id)
+    
+    async def search_documents(
+        self,
+        openid: str,
+        keyword: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """搜索用户的文档（按标题）
+        
+        注：云开发数据库不支持全文检索，这里使用简单的正则匹配
+        """
+        # 先获取所有文档，再在内存中过滤
+        # 对于大量文档可考虑接入搜索引擎
+        all_docs = await self.get_documents(openid, limit=200)
+        
+        keyword_lower = keyword.lower()
+        matched = []
+        for doc in all_docs:
+            title = doc.get("title", "") or doc.get("name", "")
+            if keyword_lower in title.lower():
+                matched.append(doc)
+            if len(matched) >= limit:
+                break
+        
+        return matched
+    
+    async def get_document_stats(self, openid: str) -> Dict[str, Any]:
+        """获取用户文档统计
+        
+        Returns:
+            统计数据：总数、按类型分布、按状态分布
+        """
+        all_docs = await self.get_documents(openid, limit=500)
+        
+        total = len(all_docs)
+        by_type: Dict[str, int] = {}
+        by_status: Dict[str, int] = {}
+        total_pages = 0
+        ready_count = 0
+        
+        for doc in all_docs:
+            # 按类型统计
+            doc_type = doc.get("type", "other")
+            by_type[doc_type] = by_type.get(doc_type, 0) + 1
+            
+            # 按状态统计
+            status = doc.get("status", "unknown")
+            by_status[status] = by_status.get(status, 0) + 1
+            
+            # 累计页数
+            pages = doc.get("pages") or doc.get("totalPages") or 0
+            total_pages += pages
+            
+            if status == "ready":
+                ready_count += 1
+        
+        return {
+            "total": total,
+            "ready": ready_count,
+            "totalPages": total_pages,
+            "byType": by_type,
+            "byStatus": by_status,
+        }
+    
+    async def get_recent_documents(
+        self,
+        openid: str,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """获取最近阅读/上传的文档"""
+        return await self.db.query(
+            "documents",
+            {"openid": openid, "status": "ready"},
+            limit=limit,
+            order_by="updatedAt",
+            order_type="desc",
+        )
+    
+    async def get_document_with_progress(
+        self,
+        openid: str,
+        doc_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """获取文档及其阅读进度"""
+        doc = await self.get_document_by_id(doc_id)
+        if not doc or doc.get("openid") != openid:
+            return None
+        
+        # 尝试从 doc_progress 集合获取阅读进度
+        try:
+            progress = await self.db.get_one(
+                "doc_progress",
+                {"openid": openid, "docId": doc_id},
+            )
+            if progress:
+                doc["readProgress"] = progress.get("progress", 0)
+                doc["currentPage"] = progress.get("currentPage", 1)
+                doc["lastReadAt"] = progress.get("updatedAt")
+        except Exception:
+            # 进度集合可能不存在
+            pass
+        
+        return doc
+

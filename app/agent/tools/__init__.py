@@ -14,6 +14,7 @@ AI Agent 工具系统
 - 任务管理工具：今日任务、任务完成、进度查询
 - 错题本工具：错题管理、复习生成
 - 统计工具：学习统计、排行榜、达成率分析
+- 文档工具：文档列表、搜索、统计（文档伴读）
 """
 
 from typing import List, TYPE_CHECKING
@@ -84,6 +85,14 @@ from .stats import (
     create_get_calendar_data_tool,
 )
 
+# 文档相关（文档伴读）
+from .documents import (
+    create_get_documents_tool,
+    create_search_documents_tool,
+    create_get_document_stats_tool,
+    create_get_recent_documents_tool,
+)
+
 if TYPE_CHECKING:
     from ..memory import AgentMemory
 
@@ -102,7 +111,7 @@ def get_all_tools(
         memory: Agent 记忆实例
         
     Returns:
-        工具列表（共23个工具）
+        工具列表（共27个工具）
     """
     return [
         # ==================== 学习计划工具 ====================
@@ -151,6 +160,12 @@ def get_all_tools(
         create_get_achievement_rate_tool(user_id=user_id, memory=memory),
         create_analyze_learning_pattern_tool(user_id=user_id, memory=memory),
         create_get_calendar_data_tool(user_id=user_id, memory=memory),
+        
+        # ==================== 文档工具（文档伴读）====================
+        create_get_documents_tool(user_id=user_id, memory=memory),
+        create_search_documents_tool(user_id=user_id, memory=memory),
+        create_get_document_stats_tool(user_id=user_id, memory=memory),
+        create_get_recent_documents_tool(user_id=user_id, memory=memory),
     ]
 
 

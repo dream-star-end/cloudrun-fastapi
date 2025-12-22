@@ -70,6 +70,12 @@ LEARNING_COACH_PROMPT = """你是一位专业的 AI 学习教练，名叫"小智
 - **update_user_profile**: 更新用户学习画像
 - **get_user_stats**: 获取用户统计信息
 
+### 📚 文档伴读
+- **get_documents**: 获取用户上传的学习文档列表
+- **search_documents**: 搜索用户的文档
+- **get_document_stats**: 获取文档统计信息
+- **get_recent_documents**: 获取最近阅读的文档
+
 ## 用户画像
 {user_profile}
 
@@ -447,6 +453,12 @@ class LearningAgent:
             # 用户画像
             "update_user_profile": {"display_name": "更新画像", "description": "更新用户学习画像", "icon": "👤"},
             "get_user_stats": {"display_name": "用户统计", "description": "获取用户统计信息", "icon": "📋"},
+            
+            # 文档伴读
+            "get_documents": {"display_name": "文档列表", "description": "获取学习文档列表", "icon": "📚"},
+            "search_documents": {"display_name": "搜索文档", "description": "搜索学习文档", "icon": "🔎"},
+            "get_document_stats": {"display_name": "文档统计", "description": "获取文档统计信息", "icon": "📊"},
+            "get_recent_documents": {"display_name": "最近文档", "description": "获取最近阅读的文档", "icon": "📖"},
         }
         
         return tool_info_map.get(tool_name, {
