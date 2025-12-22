@@ -392,6 +392,88 @@ class AIService:
                     return json.loads(json_match.group())
             
             raise ValueError("错题分析返回格式错误")
+
+    @classmethod
+    async def analyze_mistake_text_stream(
+        cls,
+        question: str,
+        user_answer: str,
+        correct_answer: Optional[str] = None,
+        subject: str = "",
+        image_url: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        错题分析（流式，返回纯文本）
+
+        用途：前端需要“边生成边展示”的体验；最终可以把完整文本保存到 mistakes.aiAnalysis。
+        """
+        prompt = f"""你是一名学习教练。请对下面错题进行分析，并直接输出【可读的中文文本】（不要输出 JSON）。
+
+请按以下结构输出（保持标题不变）：
+错误类型：
+错误原因：
+正确解法：
+涉及知识点：
+学习建议：
+
+【题目】
+{question}
+
+【学生答案】
+{user_answer}
+
+{("【正确答案】" + chr(10) + str(correct_answer)) if correct_answer else ""}
+
+{("【学科】" + str(subject)) if subject else ""}"""
+
+        # 如果有图片，使用视觉模型
+        if image_url:
+            config = AI_MODELS["vision"]
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                    ],
+                }
+            ]
+        else:
+            config = AI_MODELS["text"]
+            messages = [{"role": "user", "content": prompt}]
+
+        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
+            async with client.stream(
+                "POST",
+                f"{config['base_url']}/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {config['api_key']}",
+                },
+                json={
+                    "model": config["model"],
+                    "messages": messages,
+                    "max_tokens": 2000,
+                    "temperature": 0.7,
+                    "stream": True,
+                },
+            ) as response:
+                response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    data_str = line[6:]
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(data_str)
+                        if data.get("choices") and data["choices"][0].get("delta"):
+                            content = data["choices"][0]["delta"].get("content", "")
+                            if content:
+                                yield content
+                    except json.JSONDecodeError:
+                        continue
     
     @classmethod
     def _build_messages(

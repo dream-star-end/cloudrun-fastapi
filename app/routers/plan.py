@@ -1426,3 +1426,40 @@ async def analyze_mistake(request: AnalyzeMistakeRequest):
         return AnalyzeMistakeResponse(success=True, analysis=analysis)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/analyze-mistake/stream")
+async def analyze_mistake_stream(request: AnalyzeMistakeRequest):
+    """
+    错题分析（流式响应 SSE）
+
+    返回格式：
+    - data: {"content": "..."}  (多次)
+    - data: [DONE]
+    """
+    try:
+        async def generate():
+            try:
+                async for chunk in AIService.analyze_mistake_text_stream(
+                    question=request.question,
+                    user_answer=request.user_answer,
+                    correct_answer=request.correct_answer,
+                    subject=request.subject,
+                    image_url=request.image_url,
+                ):
+                    yield f"data: {json.dumps({'content': chunk})}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
