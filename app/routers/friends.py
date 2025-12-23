@@ -131,9 +131,6 @@ async def search_users(request: Request, body: SearchUserRequest):
     if not keyword:
         raise HTTPException(status_code=400, detail="请输入搜索关键词")
     
-    if len(keyword) < 2:
-        raise HTTPException(status_code=400, detail="搜索关键词至少2个字符")
-    
     try:
         # 搜索用户（排除自己）
         # 注意：微信云数据库的模糊搜索需要使用正则
