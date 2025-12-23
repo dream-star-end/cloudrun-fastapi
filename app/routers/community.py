@@ -11,7 +11,7 @@
 """
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Request
@@ -63,27 +63,11 @@ def _get_openid_from_request(request: Request) -> str:
     return openid
 
 
-async def _get_user_info(db, openid: str) -> dict:
-    """获取用户基本信息"""
-    user = await db.get_one("users", {"openid": openid})
-    if user:
-        return {
-            "openid": openid,
-            "nickName": user.get("nickName") or "学习者",
-            "avatarUrl": user.get("avatarUrl", ""),
-        }
-    return {
-        "openid": openid,
-        "nickName": "学习者",
-        "avatarUrl": "",
-    }
-
-
-def _parse_phase_duration(duration: str) -> int:
+def _parse_phase_duration_days(duration: str) -> int:
     """解析阶段时长字符串，返回天数"""
     if not duration:
         return 7
-    # 先提取纯时长部分（去掉括号里的日期）
+    # 提取纯时长部分（去掉括号里的日期范围）
     pure_duration = duration.split('(')[0].split('（')[0].strip()
     
     match = re.search(r'(\d+(?:\.\d+)?)\s*(周|天|月|个月)', pure_duration)
@@ -102,7 +86,7 @@ def _parse_phase_duration(duration: str) -> int:
     return 7
 
 
-def _format_days_to_readable(days: int) -> str:
+def _format_days_readable(days: int) -> str:
     """将天数转换为可读的时长文本"""
     if days < 7:
         return f"{days}天"
@@ -113,64 +97,74 @@ def _format_days_to_readable(days: int) -> str:
         months = days / 30
         if months < 1:
             return f"{round(days / 7)}周"
-        # 四舍五入到0.5个月
         rounded_months = round(months * 2) / 2
         if rounded_months == int(rounded_months):
             return f"{int(rounded_months)}个月"
         return f"{rounded_months}个月"
 
 
-def _calculate_total_duration(phases: List[dict], deadline: str = None, created_at: str = None) -> str:
+def _calculate_plan_duration(phases: List[dict], created_at, deadline: str = None) -> str:
     """
-    根据阶段信息计算总时长字符串
-    返回格式: "约X个月 (从YYYY年M月至YYYY年M月)"
+    根据计划的创建时间、截止日期和阶段信息计算总时长
+    与前端 plan 页面的 calculatePhaseDuration 逻辑保持一致
     """
     if not phases:
         return "待定"
     
-    # 计算所有阶段的总天数
-    total_days = 0
-    for phase in phases:
-        duration = phase.get("duration", "")
-        total_days += _parse_phase_duration(duration)
-    
-    # 确定开始日期
+    # 解析计划创建时间
     now = datetime.now(timezone.utc)
-    start_date = now
+    plan_start = now
     if created_at:
         try:
             if isinstance(created_at, dict) and "$date" in created_at:
-                start_date = datetime.fromisoformat(created_at["$date"].replace("Z", "+00:00"))
+                plan_start = datetime.fromisoformat(created_at["$date"].replace("Z", "+00:00"))
             elif isinstance(created_at, str):
-                start_date = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                plan_start = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
         except:
-            start_date = now
+            plan_start = now
     
-    # 确定结束日期
+    # 计算所有阶段的原始总天数
+    total_phase_days = sum(_parse_phase_duration_days(p.get("duration", "")) for p in phases)
+    
+    # 确定实际总天数和结束日期
     if deadline:
         try:
-            end_date = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
-            # 使用 deadline 到 start_date 的实际天数
-            actual_days = (end_date - start_date).days
-            if actual_days > 0:
-                total_days = actual_days
+            deadline_date = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+            if deadline_date > plan_start:
+                actual_total_days = (deadline_date - plan_start).days
+                plan_end = deadline_date
+            else:
+                actual_total_days = total_phase_days
+                plan_end = plan_start + timedelta(days=total_phase_days)
         except:
-            from datetime import timedelta
-            end_date = start_date + timedelta(days=total_days)
+            actual_total_days = total_phase_days
+            plan_end = plan_start + timedelta(days=total_phase_days)
     else:
-        from datetime import timedelta
-        end_date = start_date + timedelta(days=total_days)
+        actual_total_days = total_phase_days
+        plan_end = plan_start + timedelta(days=total_phase_days)
     
-    # 格式化时长
-    duration_text = _format_days_to_readable(total_days)
+    # 格式化
+    duration_text = _format_days_readable(actual_total_days)
+    start_str = f"{plan_start.year}年{plan_start.month}月"
+    end_str = f"{plan_end.year}年{plan_end.month}月"
     
-    # 格式化日期范围
-    start_year = start_date.year
-    start_month = start_date.month
-    end_year = end_date.year
-    end_month = end_date.month
-    
-    return f"约{duration_text}（从{start_year}年{start_month}月至{end_year}年{end_month}月）"
+    return f"约{duration_text}（从{start_str}至{end_str}）"
+
+
+async def _get_user_info(db, openid: str) -> dict:
+    """获取用户基本信息"""
+    user = await db.get_one("users", {"openid": openid})
+    if user:
+        return {
+            "openid": openid,
+            "nickName": user.get("nickName") or "学习者",
+            "avatarUrl": user.get("avatarUrl", ""),
+        }
+    return {
+        "openid": openid,
+        "nickName": "学习者",
+        "avatarUrl": "",
+    }
 
 
 # ==================== API 路由 ====================
@@ -338,17 +332,18 @@ async def share_plan(request: Request, body: SharePlanRequest):
     # 创建分享记录
     now = datetime.now(timezone.utc).isoformat()
     
-    # 重新计算 totalDuration，使用当前时间作为起点
+    # 使用原计划的创建时间和截止日期计算时间，与计划页面显示一致
     phases = plan.get("phases", [])
+    plan_created_at = plan.get("createdAt")
     deadline = plan.get("deadline")
-    total_duration = _calculate_total_duration(phases, deadline, None)  # 使用当前时间
+    total_duration = _calculate_plan_duration(phases, plan_created_at, deadline)
     
     shared_plan = {
         "openid": openid,
         "originalPlanId": plan_id,
         "title": title.strip(),
         "description": description.strip(),
-        # 计划快照
+        # 计划快照 - 使用与计划页面一致的时间计算
         "goal": plan.get("goal", ""),
         "domain": plan.get("domain", ""),
         "domainName": plan.get("domainName", ""),
