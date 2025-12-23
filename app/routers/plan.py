@@ -133,6 +133,8 @@ def _calculate_phases_with_dates(phases: List[Dict], created_at: datetime, deadl
     """
     计算每个阶段的具体日期范围，返回更新后的 phases 和 totalDuration
     
+    修改策略：保留 AI 生成的原始时长文本，只添加日期范围，避免精度损失
+    
     Args:
         phases: 阶段列表
         created_at: 计划创建时间
@@ -144,7 +146,7 @@ def _calculate_phases_with_dates(phases: List[Dict], created_at: datetime, deadl
     if not phases:
         return phases, "待定"
     
-    # 计算每个阶段的原始天数
+    # 计算每个阶段的原始天数（用于计算日期范围）
     phase_days = []
     for phase in phases:
         days = _parse_duration_to_days(phase.get("duration", ""))
@@ -154,6 +156,7 @@ def _calculate_phases_with_dates(phases: List[Dict], created_at: datetime, deadl
     
     # 解析截止日期（确保是 aware datetime）
     deadline_date = None
+    has_deadline = False
     if deadline_str:
         try:
             parsed = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
@@ -162,6 +165,7 @@ def _calculate_phases_with_dates(phases: List[Dict], created_at: datetime, deadl
                 deadline_date = parsed.replace(tzinfo=timezone.utc)
             else:
                 deadline_date = parsed
+            has_deadline = True
         except:
             pass
     
@@ -172,8 +176,11 @@ def _calculate_phases_with_dates(phases: List[Dict], created_at: datetime, deadl
         actual_total_days = total_original_days
         deadline_date = created_at + timedelta(days=total_original_days)
     
-    # 按比例分配每个阶段的实际天数
-    if total_original_days > 0:
+    # 只有当用户明确设置了截止日期，且截止日期与 AI 计算的总时长差异较大时，才按比例调整
+    # 否则保留 AI 生成的原始时长
+    need_rescale = has_deadline and abs(actual_total_days - total_original_days) > 7  # 差异超过7天才调整
+    
+    if need_rescale and total_original_days > 0:
         actual_phase_days = [
             max(1, round((d / total_original_days) * actual_total_days))
             for d in phase_days
@@ -181,7 +188,7 @@ def _calculate_phases_with_dates(phases: List[Dict], created_at: datetime, deadl
     else:
         actual_phase_days = phase_days
     
-    # 计算每个阶段的起止日期并更新 duration
+    # 计算每个阶段的起止日期
     current_date = created_at
     updated_phases = []
     
@@ -192,7 +199,20 @@ def _calculate_phases_with_dates(phases: List[Dict], created_at: datetime, deadl
         # 格式化日期范围
         start_str = f"{phase_start.year}年{phase_start.month}月"
         end_str = f"{phase_end.year}年{phase_end.month}月"
-        duration_text = _days_to_readable(actual_phase_days[i])
+        
+        # 保留 AI 生成的原始时长文本，只添加日期范围
+        original_duration = phase.get("duration", "")
+        # 去掉原有的日期范围（如果有的话）
+        if '(' in original_duration:
+            original_duration = original_duration.split('(')[0].strip()
+        elif '（' in original_duration:
+            original_duration = original_duration.split('（')[0].strip()
+        
+        # 如果需要重新调整时长，才使用计算后的值
+        if need_rescale:
+            duration_text = _days_to_readable(actual_phase_days[i])
+        else:
+            duration_text = original_duration if original_duration else _days_to_readable(actual_phase_days[i])
         
         # 更新阶段信息
         updated_phase = {**phase}
