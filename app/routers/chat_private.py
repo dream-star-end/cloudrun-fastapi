@@ -24,7 +24,8 @@ router = APIRouter(prefix="/api/chat/private", tags=["私聊消息"])
 class SendMessageRequest(BaseModel):
     receiverOpenid: str
     content: str
-    messageType: str = "text"  # text, image
+    messageType: str = "text"  # text, image, voice, progress
+    voiceDuration: Optional[int] = None  # 语音时长（秒）
     reference: Optional[dict] = None  # 关联内容
 
 
@@ -36,6 +37,18 @@ class GetMessagesRequest(BaseModel):
 
 class MarkReadRequest(BaseModel):
     chatId: str
+
+
+class DeleteConversationRequest(BaseModel):
+    chatId: str
+
+
+class ClearChatRequest(BaseModel):
+    chatId: str
+
+
+class RecallMessageRequest(BaseModel):
+    messageId: str
 
 
 # ==================== 工具函数 ====================
@@ -236,9 +249,11 @@ async def send_message(request: Request, body: SendMessageRequest):
     receiver_openid = body.receiverOpenid
     content = body.content
     message_type = body.messageType
+    voice_duration = body.voiceDuration
     reference = body.reference
     
-    if not content.strip():
+    # 语音和图片消息可以为空内容（存储的是文件ID）
+    if message_type == "text" and not content.strip():
         raise HTTPException(status_code=400, detail="消息内容不能为空")
     
     if len(content) > 2000:
@@ -271,12 +286,20 @@ async def send_message(request: Request, body: SendMessageRequest):
         "chatId": chat_id,
         "senderOpenid": openid,
         "receiverOpenid": receiver_openid,
-        "content": content.strip(),
+        "content": content.strip() if message_type == "text" else content,
         "messageType": message_type,
         "reference": reference,
         "isRead": False,
         "createdAt": {"$date": now},
     }
+    
+    # 添加语音时长
+    if message_type == "voice" and voice_duration:
+        message["voiceDuration"] = voice_duration
+    
+    # 添加图片URL（用于前端展示）
+    if message_type == "image":
+        message["imageUrl"] = content
     
     message_id = await db.add("private_messages", message)
     message["_id"] = message_id
@@ -285,9 +308,16 @@ async def send_message(request: Request, body: SendMessageRequest):
     current_unread = chat.get("unreadCount", {}).get(receiver_openid, 0) or 0
     
     # 构建最后一条消息预览
-    preview_content = content.strip()
-    if len(preview_content) > 30:
-        preview_content = preview_content[:30] + "..."
+    if message_type == "voice":
+        preview_content = f"[语音] {voice_duration}″"
+    elif message_type == "image":
+        preview_content = "[图片]"
+    elif message_type == "progress":
+        preview_content = "[学习进度]"
+    else:
+        preview_content = content.strip()
+        if len(preview_content) > 30:
+            preview_content = preview_content[:30] + "..."
     
     await db.update_by_id(
         "private_chats",
@@ -559,5 +589,156 @@ async def share_progress(request: Request):
         "data": {
             "message": message,
         }
+    }
+
+
+@router.post("/delete-conversation")
+async def delete_conversation(request: Request, body: DeleteConversationRequest):
+    """
+    删除会话（仅从自己的列表中隐藏）
+    """
+    openid = _get_openid_from_request(request)
+    db = get_db()
+    
+    chat_id = body.chatId
+    
+    # 验证会话权限
+    chat = await db.get_by_id("private_chats", chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    if openid not in chat.get("participants", []):
+        raise HTTPException(status_code=403, detail="无权操作此会话")
+    
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # 标记用户删除了此会话（软删除）
+    deleted_by = chat.get("deletedBy", [])
+    if openid not in deleted_by:
+        deleted_by.append(openid)
+    
+    await db.update_by_id(
+        "private_chats",
+        chat_id,
+        {
+            "deletedBy": deleted_by,
+            "updatedAt": {"$date": now},
+        }
+    )
+    
+    return {
+        "success": True,
+        "message": "会话已删除",
+    }
+
+
+@router.post("/clear-history")
+async def clear_chat_history(request: Request, body: ClearChatRequest):
+    """
+    清空聊天记录（仅清空自己能看到的）
+    """
+    openid = _get_openid_from_request(request)
+    db = get_db()
+    
+    chat_id = body.chatId
+    
+    # 验证会话权限
+    chat = await db.get_by_id("private_chats", chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    if openid not in chat.get("participants", []):
+        raise HTTPException(status_code=403, detail="无权操作此会话")
+    
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # 记录用户清空聊天的时间点，之前的消息不再显示
+    await db.update_by_id(
+        "private_chats",
+        chat_id,
+        {
+            f"clearedAt.{openid}": {"$date": now},
+            "updatedAt": {"$date": now},
+        }
+    )
+    
+    return {
+        "success": True,
+        "message": "聊天记录已清空",
+    }
+
+
+@router.post("/recall")
+async def recall_message(request: Request, body: RecallMessageRequest):
+    """
+    撤回消息（2分钟内可撤回）
+    """
+    openid = _get_openid_from_request(request)
+    db = get_db()
+    
+    message_id = body.messageId
+    
+    # 获取消息
+    message = await db.get_by_id("private_messages", message_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="消息不存在")
+    
+    # 验证是否是发送者
+    if message.get("senderOpenid") != openid:
+        raise HTTPException(status_code=403, detail="只能撤回自己发送的消息")
+    
+    # 验证时间（2分钟内）
+    created_at = message.get("createdAt")
+    if isinstance(created_at, dict) and "$date" in created_at:
+        created_at = created_at["$date"]
+    
+    if created_at:
+        msg_time = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        diff = (now - msg_time).total_seconds()
+        
+        if diff > 120:  # 2分钟
+            raise HTTPException(status_code=400, detail="消息发送超过2分钟，无法撤回")
+    
+    now_str = datetime.now(timezone.utc).isoformat()
+    
+    # 标记消息为已撤回
+    await db.update_by_id(
+        "private_messages",
+        message_id,
+        {
+            "isRecalled": True,
+            "recalledAt": {"$date": now_str},
+            "originalContent": message.get("content"),
+            "originalMessageType": message.get("messageType"),
+            "content": "",
+            "messageType": "recalled",
+        }
+    )
+    
+    # 更新会话的最后消息（如果这是最后一条消息）
+    chat_id = message.get("chatId")
+    chat = await db.get_by_id("private_chats", chat_id)
+    
+    if chat:
+        last_msg = chat.get("lastMessage", {})
+        # 简单检查：如果最后消息是撤回的消息（通过发送者判断）
+        if last_msg and last_msg.get("senderOpenid") == openid:
+            await db.update_by_id(
+                "private_chats",
+                chat_id,
+                {
+                    "lastMessage": {
+                        "content": "撤回了一条消息",
+                        "senderOpenid": openid,
+                        "messageType": "recalled",
+                    },
+                    "updatedAt": {"$date": now_str},
+                }
+            )
+    
+    return {
+        "success": True,
+        "message": "消息已撤回",
     }
 
