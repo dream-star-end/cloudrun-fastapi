@@ -458,15 +458,21 @@ async def use_plan(request: Request, body: UsePlanRequest):
         phase["id"] = f"phase_{i+1}_{uuid.uuid4().hex[:8]}"
         phase["status"] = "completed"
     
-    # 获取领域名称
+    # 获取领域名称（与前端 app.js 中的 studyDomains 保持一致）
     domain = shared_plan.get("domain", "")
     domain_names = {
+        # 前端新版 domain ID
+        "exam_postgraduate": "考研",
+        "exam_civil": "考公",
+        "exam_english": "英语",
+        "exam_cert": "考证",
+        "programming": "编程",
+        "other": "其他",
+        # 兼容旧版 domain ID
         "postgraduate": "考研",
         "english": "英语学习",
-        "programming": "编程技术",
         "certification": "职业认证",
         "academic": "学业提升",
-        "other": "其他",
     }
     domain_name = domain_names.get(domain, shared_plan.get("domainName", domain))
     

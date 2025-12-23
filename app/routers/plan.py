@@ -37,6 +37,43 @@ router = APIRouter(prefix="/api/plan", tags=["学习计划"])
 # ==================== 工具函数 ====================
 
 
+# 领域名称映射（与前端 app.js 中的 studyDomains 保持一致）
+DOMAIN_NAMES = {
+    # 前端新版 domain ID
+    "exam_postgraduate": "考研",
+    "exam_civil": "考公",
+    "exam_english": "英语",
+    "exam_cert": "考证",
+    "programming": "编程",
+    "other": "其他",
+    # 兼容旧版 domain ID
+    "postgraduate": "考研",
+    "english": "英语学习",
+    "certification": "职业认证",
+    "academic": "学业提升",
+}
+
+
+def _fix_domain_name(plan: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    修复计划的 domainName 字段，确保显示中文名称而非 domain ID
+    """
+    if not plan:
+        return plan
+    
+    domain_name = plan.get("domainName", "")
+    domain = plan.get("domain", "")
+    
+    # 如果 domainName 看起来是 domain ID（包含下划线或在映射表中），则转换为中文名称
+    if domain_name in DOMAIN_NAMES:
+        plan["domainName"] = DOMAIN_NAMES[domain_name]
+    elif not domain_name and domain:
+        # domainName 为空时，根据 domain 字段获取中文名称
+        plan["domainName"] = DOMAIN_NAMES.get(domain, domain)
+    
+    return plan
+
+
 def _get_openid_from_request(request: Request) -> str:
     openid = request.headers.get("x-wx-openid") or request.headers.get("X-WX-OPENID")
     if not openid:
@@ -209,6 +246,9 @@ async def get_active_plan(request: Request):
     current_phase = _get_current_phase(plan)
     if current_phase:
         plan["currentPhase"] = current_phase
+    
+    # 修复 domainName 显示（将 domain ID 转换为中文名称）
+    plan = _fix_domain_name(plan)
 
     return {
         "success": True,
@@ -242,16 +282,8 @@ async def save_plan(request: Request):
     current_level = body.get("currentLevel") or body.get("current_level") or "beginner"
     personalization = body.get("personalization") or body.get("preferences") or plan_data.get("personalization") or plan_data.get("preferences") or None
 
-    # 获取领域名称
-    domain_names = {
-        "postgraduate": "考研",
-        "english": "英语学习",
-        "programming": "编程技术",
-        "certification": "职业认证",
-        "academic": "学业提升",
-        "other": "其他",
-    }
-    domain_name = domain_names.get(domain, domain)
+    # 获取领域中文名称
+    domain_name = DOMAIN_NAMES.get(domain, domain)
 
     # 将现有 active 计划置为 archived
     await db.update(
