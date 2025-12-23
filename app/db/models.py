@@ -246,3 +246,99 @@ class CommunityLike(BaseModel):
     planId: str  # 分享计划 ID (shared_plans._id)
     openid: str  # 点赞者 openid
     createdAt: Optional[datetime] = None
+
+
+# ==================== 学友系统相关模型 ====================
+
+class Friendship(BaseModel):
+    """学友关系 - 对应 friendships 集合"""
+    _id: Optional[str] = None
+    openid: str  # 发起者 openid
+    friendOpenid: str  # 学友 openid
+    status: str = "pending"  # pending（待确认）, accepted（已接受）, rejected（已拒绝）, blocked（已屏蔽）
+    # 双方用户信息快照
+    userInfo: Optional[Dict[str, Any]] = None  # 发起者信息
+    friendInfo: Optional[Dict[str, Any]] = None  # 学友信息
+    remark: str = ""  # 备注名
+    createdAt: Optional[datetime] = None
+    updatedAt: Optional[datetime] = None
+    acceptedAt: Optional[datetime] = None
+
+
+class StudyBuddy(BaseModel):
+    """学伴关系 - 对应 study_buddies 集合
+    表示两个用户共同学习同一个计划
+    """
+    _id: Optional[str] = None
+    planId: str  # 学习计划 ID
+    planOwnerOpenid: str  # 计划发起者 openid
+    buddyOpenid: str  # 学伴 openid
+    status: str = "pending"  # pending, accepted, rejected, left
+    # 用户信息快照
+    planOwnerInfo: Optional[Dict[str, Any]] = None
+    buddyInfo: Optional[Dict[str, Any]] = None
+    inviteMessage: str = ""  # 邀请消息
+    createdAt: Optional[datetime] = None
+    acceptedAt: Optional[datetime] = None
+
+
+class StudySupervisor(BaseModel):
+    """监督者关系 - 对应 study_supervisors 集合
+    监督者可以查看被监督者的学习进度并发送提醒
+    """
+    _id: Optional[str] = None
+    supervisorOpenid: str  # 监督者 openid
+    supervisedOpenid: str  # 被监督者 openid
+    planId: Optional[str] = None  # 监督的计划 ID（可选，为空表示监督所有计划）
+    status: str = "pending"  # pending, accepted, rejected, ended
+    # 用户信息快照
+    supervisorInfo: Optional[Dict[str, Any]] = None
+    supervisedInfo: Optional[Dict[str, Any]] = None
+    # 监督设置
+    settings: Dict[str, Any] = {}  # 监督设置（如提醒频率、提醒时间等）
+    inviteMessage: str = ""  # 邀请消息
+    createdAt: Optional[datetime] = None
+    acceptedAt: Optional[datetime] = None
+
+
+class PrivateChat(BaseModel):
+    """私聊会话 - 对应 private_chats 集合"""
+    _id: Optional[str] = None
+    # 参与者（按 openid 排序存储，便于查询）
+    participants: List[str]  # [openid1, openid2]
+    # 最新消息预览
+    lastMessage: Optional[Dict[str, Any]] = None
+    lastMessageAt: Optional[datetime] = None
+    # 各方未读数
+    unreadCount: Dict[str, int] = {}  # {openid: count}
+    # 各方用户信息快照
+    participantInfos: Dict[str, Dict[str, Any]] = {}  # {openid: userInfo}
+    createdAt: Optional[datetime] = None
+    updatedAt: Optional[datetime] = None
+
+
+class PrivateMessage(BaseModel):
+    """私聊消息 - 对应 private_messages 集合"""
+    _id: Optional[str] = None
+    chatId: str  # 会话 ID (private_chats._id)
+    senderOpenid: str  # 发送者 openid
+    receiverOpenid: str  # 接收者 openid
+    content: str  # 消息内容
+    messageType: str = "text"  # text, image, system（系统消息）
+    # 关联内容（用于分享学习进度等）
+    reference: Optional[Dict[str, Any]] = None  # {type: 'progress'|'plan'|'task', data: {...}}
+    isRead: bool = False
+    readAt: Optional[datetime] = None
+    createdAt: Optional[datetime] = None
+
+
+class SupervisorReminder(BaseModel):
+    """监督者提醒记录 - 对应 supervisor_reminders 集合"""
+    _id: Optional[str] = None
+    supervisorOpenid: str  # 监督者 openid
+    supervisedOpenid: str  # 被监督者 openid
+    relationId: str  # 监督关系 ID (study_supervisors._id)
+    reminderType: str  # daily_checkin（每日打卡）, task_progress（任务进度）, encouragement（鼓励）
+    content: str  # 提醒内容
+    isRead: bool = False
+    createdAt: Optional[datetime] = None

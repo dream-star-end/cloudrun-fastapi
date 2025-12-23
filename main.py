@@ -21,6 +21,8 @@ from app.routers.tasks import router as tasks_router
 from app.routers.agent import router as agent_router
 from app.routers.mistakes import router as mistakes_router
 from app.routers.community import router as community_router
+from app.routers.friends import router as friends_router
+from app.routers.chat_private import router as chat_private_router
 
 
 @asynccontextmanager
@@ -85,6 +87,8 @@ app.include_router(tasks_router)
 app.include_router(agent_router)  # AI Agent 路由
 app.include_router(mistakes_router)  # 错题本 CRUD（替代云函数）
 app.include_router(community_router)  # 学习社区路由
+app.include_router(friends_router)  # 学友系统路由
+app.include_router(chat_private_router)  # 私聊消息路由
 
 
 # ==================== 基础端点 ====================
@@ -242,6 +246,83 @@ async def api_info():
                 "path": "/api/community/use",
                 "methods": ["POST"],
                 "description": "使用（复制）社区计划",
+            },
+            # 学友系统
+            "friends_search": {
+                "path": "/api/friends/search",
+                "methods": ["POST"],
+                "description": "搜索用户",
+            },
+            "friends_add": {
+                "path": "/api/friends/add",
+                "methods": ["POST"],
+                "description": "添加学友",
+            },
+            "friends_list": {
+                "path": "/api/friends/list",
+                "methods": ["GET"],
+                "description": "获取学友列表",
+            },
+            "friends_requests": {
+                "path": "/api/friends/requests",
+                "methods": ["GET"],
+                "description": "获取好友请求",
+            },
+            "friends_handle": {
+                "path": "/api/friends/handle",
+                "methods": ["POST"],
+                "description": "处理好友请求",
+            },
+            "supervisor_invite": {
+                "path": "/api/friends/supervisor/invite",
+                "methods": ["POST"],
+                "description": "邀请监督者",
+            },
+            "supervisor_list": {
+                "path": "/api/friends/supervisor/list",
+                "methods": ["GET"],
+                "description": "获取监督关系列表",
+            },
+            "supervisor_remind": {
+                "path": "/api/friends/supervisor/remind",
+                "methods": ["POST"],
+                "description": "发送监督提醒",
+            },
+            "buddy_invite": {
+                "path": "/api/friends/buddy/invite",
+                "methods": ["POST"],
+                "description": "邀请学伴",
+            },
+            "buddy_list": {
+                "path": "/api/friends/buddy/list",
+                "methods": ["GET"],
+                "description": "获取学伴列表",
+            },
+            # 私聊消息
+            "chat_conversations": {
+                "path": "/api/chat/private/conversations",
+                "methods": ["GET"],
+                "description": "获取会话列表",
+            },
+            "chat_messages": {
+                "path": "/api/chat/private/messages",
+                "methods": ["POST"],
+                "description": "获取消息列表",
+            },
+            "chat_send": {
+                "path": "/api/chat/private/send",
+                "methods": ["POST"],
+                "description": "发送消息",
+            },
+            "chat_read": {
+                "path": "/api/chat/private/read",
+                "methods": ["POST"],
+                "description": "标记已读",
+            },
+            "chat_unread_count": {
+                "path": "/api/chat/private/unread-count",
+                "methods": ["GET"],
+                "description": "获取未读消息数",
             },
         },
     }
