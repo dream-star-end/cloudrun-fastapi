@@ -152,11 +152,16 @@ def _calculate_phases_with_dates(phases: List[Dict], created_at: datetime, deadl
     
     total_original_days = sum(phase_days)
     
-    # 解析截止日期
+    # 解析截止日期（确保是 aware datetime）
     deadline_date = None
     if deadline_str:
         try:
-            deadline_date = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+            # 如果解析出的是 naive datetime，添加 UTC 时区
+            if parsed.tzinfo is None:
+                deadline_date = parsed.replace(tzinfo=timezone.utc)
+            else:
+                deadline_date = parsed
         except:
             pass
     
