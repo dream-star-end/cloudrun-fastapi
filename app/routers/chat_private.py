@@ -423,9 +423,13 @@ async def get_unread_count(request: Request):
                 "receiverOpenid": openid,
                 "isRead": False,
             },
-            sort=[("createdAt", -1)],
-            limit=10,  # 最多返回10条
+            limit=20,  # 多取一些，后面排序截取
         )
+        
+        # 按创建时间倒序排序
+        recent_messages.sort(key=lambda x: x.get("createdAt", ""), reverse=True)
+        # 只取前10条
+        recent_messages = recent_messages[:10]
         
         # 获取发送者信息
         for msg in recent_messages:
