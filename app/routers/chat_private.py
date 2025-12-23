@@ -90,7 +90,9 @@ async def _get_or_create_chat(db, openid1: str, openid2: str) -> dict:
             openid2: user2_info,
         },
         "unreadCount": {openid1: 0, openid2: 0},
-        "lastMessage": None,
+        # 使用空对象而非 None，避免 CloudBase 更新嵌套字段时报错
+        # "Cannot create field 'xxx' in element {lastMessage: null}"
+        "lastMessage": {},
         "lastMessageAt": None,
         "createdAt": {"$date": now},
         "updatedAt": {"$date": now},
