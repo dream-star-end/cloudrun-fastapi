@@ -203,6 +203,25 @@ class WxCloudDB:
             logger.debug(f"[WxCloudDB] 响应数据: {json.dumps(result, ensure_ascii=False)[:500]}")
             return result
 
+        async def do_post_with_retry(url: str, max_retries: int = 3) -> Dict[str, Any]:
+            """带指数退避的 HTTP POST 请求，用于应对瞬时网络抖动"""
+            import asyncio
+            last_exc: Optional[Exception] = None
+            for attempt in range(max_retries):
+                try:
+                    return await do_post(url)
+                except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as e:
+                    last_exc = e
+                    if attempt < max_retries - 1:
+                        delay = 0.2 * (2 ** attempt)  # 0.2s, 0.4s, 0.8s
+                        logger.warning(f"[WxCloudDB] HTTP 请求失败(尝试 {attempt+1}/{max_retries})，{delay:.1f}s 后重试: {type(e).__name__}: {e}")
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(f"[WxCloudDB] HTTP 请求失败，已达最大重试次数 ({max_retries}): {type(e).__name__}: {e}")
+                        raise
+            # Should not reach here, but just in case
+            raise last_exc if last_exc else Exception("Unexpected retry loop exit")
+
         # 云托管优先走「开放接口服务」：
         # - 请求 api.weixin.qq.com 的接口时，不携带 access_token/cloudbase_access_token
         # - 需要在控制台配置「微信令牌权限」白名单
@@ -210,12 +229,7 @@ class WxCloudDB:
 
         if use_openapi_service:
             url = f"{self.base_url}/{action}"
-            try:
-                result = await do_post(url)
-            except Exception as e:
-                logger.error(f"[WxCloudDB] HTTP 请求失败(开放接口服务): {type(e).__name__}: {str(e)}")
-                # 网络层异常：短暂抖动时重试一次
-                result = await do_post(url)
+            result = await do_post_with_retry(url)
         else:
             # 非云托管/或禁用开放接口服务：需要 access_token
             try:
@@ -226,12 +240,12 @@ class WxCloudDB:
                 raise
 
             url = f"{self.base_url}/{action}?access_token={token}"
-            # 发送请求（支持一次刷新 + 轻量重试）
+            # 发送请求（带指数退避重试）
             try:
-                result = await do_post(url)
-            except Exception as e:
-                logger.error(f"[WxCloudDB] HTTP 请求失败: {type(e).__name__}: {str(e)}")
-                # 网络层异常：短暂抖动时重试一次（强制刷新 token）
+                result = await do_post_with_retry(url)
+            except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as e:
+                # 网络层异常：最后尝试刷新 token 并重试一次
+                logger.warning(f"[WxCloudDB] HTTP 请求失败，尝试刷新 token 后最后重试: {type(e).__name__}: {e}")
                 await self._get_access_token(force_refresh=True)
                 token = await self._get_access_token()
                 url = f"{self.base_url}/{action}?access_token={token}"
