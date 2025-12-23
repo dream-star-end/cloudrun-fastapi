@@ -620,6 +620,60 @@ async def use_plan(request: Request, body: UsePlanRequest):
     }
 
 
+@router.post("/update")
+async def update_shared_plan(request: Request):
+    """
+    修改分享的计划（标题和描述）
+    """
+    openid = _get_openid_from_request(request)
+    db = get_db()
+    
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    plan_id = body.get("planId")
+    title = body.get("title")
+    description = body.get("description")
+    
+    if not plan_id:
+        raise HTTPException(status_code=400, detail="缺少 planId")
+    
+    if not title or not title.strip():
+        raise HTTPException(status_code=400, detail="请输入分享标题")
+    
+    # 获取分享的计划
+    shared_plan = await db.get_by_id("shared_plans", plan_id)
+    if not shared_plan:
+        raise HTTPException(status_code=404, detail="计划不存在")
+    
+    if shared_plan.get("openid") != openid:
+        raise HTTPException(status_code=403, detail="只能修改自己分享的计划")
+    
+    if shared_plan.get("status") != "active":
+        raise HTTPException(status_code=400, detail="该计划已下架，无法修改")
+    
+    # 更新
+    now = datetime.now(timezone.utc).isoformat()
+    update_data = {
+        "title": title.strip(),
+        "description": (description or "").strip(),
+        "updatedAt": {"$date": now},
+    }
+    
+    await db.update_by_id("shared_plans", plan_id, update_data)
+    
+    return {
+        "success": True,
+        "message": "修改成功",
+        "data": {
+            "title": title.strip(),
+            "description": (description or "").strip(),
+        }
+    }
+
+
 @router.post("/delete")
 async def delete_shared_plan(request: Request):
     """
