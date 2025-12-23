@@ -396,7 +396,7 @@ async def mark_read(request: Request, body: MarkReadRequest):
 @router.get("/unread-count")
 async def get_unread_count(request: Request):
     """
-    获取总未读消息数
+    获取总未读消息数和最新未读消息（用于通知）
     """
     openid = _get_openid_from_request(request)
     db = get_db()
@@ -413,10 +413,44 @@ async def get_unread_count(request: Request):
         unread = chat.get("unreadCount", {}).get(openid, 0) or 0
         total_unread += unread
     
+    # 获取最新的未读消息（用于弹出通知）
+    # 只获取最近1分钟内收到的未读消息
+    from datetime import datetime, timezone, timedelta
+    one_minute_ago = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    
+    new_messages = []
+    try:
+        # 查询最近收到的未读消息
+        recent_messages = await db.query(
+            "private_messages",
+            {
+                "receiverOpenid": openid,
+                "isRead": False,
+                "createdAt": {"$gte": {"$date": one_minute_ago}},
+            },
+            sort=[("createdAt", -1)],
+            limit=5,
+        )
+        
+        # 获取发送者信息
+        for msg in recent_messages:
+            sender_openid = msg.get("senderOpenid")
+            if sender_openid:
+                # 获取发送者用户信息
+                sender = await db.get_one("users", {"openid": sender_openid})
+                if sender:
+                    msg["senderNickName"] = sender.get("nickName", "学友")
+                    msg["senderAvatarUrl"] = sender.get("avatarUrl", "")
+                new_messages.append(msg)
+    except Exception as e:
+        print(f"获取新消息失败: {e}")
+    
     return {
         "success": True,
         "data": {
-            "unreadCount": total_unread,
+            "totalUnread": total_unread,
+            "unreadCount": total_unread,  # 兼容旧版本
+            "newMessages": new_messages,
         }
     }
 
