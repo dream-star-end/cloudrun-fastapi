@@ -414,22 +414,17 @@ async def get_unread_count(request: Request):
         total_unread += unread
     
     # 获取最新的未读消息（用于弹出通知）
-    # 只获取最近1分钟内收到的未读消息
-    from datetime import datetime, timezone, timedelta
-    one_minute_ago = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
-    
     new_messages = []
     try:
-        # 查询最近收到的未读消息
+        # 查询最近收到的未读消息（不限制时间，只要是未读的就返回）
         recent_messages = await db.query(
             "private_messages",
             {
                 "receiverOpenid": openid,
                 "isRead": False,
-                "createdAt": {"$gte": {"$date": one_minute_ago}},
             },
             sort=[("createdAt", -1)],
-            limit=5,
+            limit=10,  # 最多返回10条
         )
         
         # 获取发送者信息
