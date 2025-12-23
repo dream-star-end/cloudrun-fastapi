@@ -9,9 +9,10 @@
 - 复制使用计划
 - 社区统计
 """
+import re
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -68,7 +69,7 @@ async def _get_user_info(db, openid: str) -> dict:
     if user:
         return {
             "openid": openid,
-            "nickName": user.get("nickName", "学习者"),
+            "nickName": user.get("nickName") or "学习者",
             "avatarUrl": user.get("avatarUrl", ""),
         }
     return {
@@ -76,6 +77,100 @@ async def _get_user_info(db, openid: str) -> dict:
         "nickName": "学习者",
         "avatarUrl": "",
     }
+
+
+def _parse_phase_duration(duration: str) -> int:
+    """解析阶段时长字符串，返回天数"""
+    if not duration:
+        return 7
+    # 先提取纯时长部分（去掉括号里的日期）
+    pure_duration = duration.split('(')[0].split('（')[0].strip()
+    
+    match = re.search(r'(\d+(?:\.\d+)?)\s*(周|天|月|个月)', pure_duration)
+    if not match:
+        return 7
+    
+    value = float(match.group(1))
+    unit = match.group(2)
+    
+    if unit == '天':
+        return int(value)
+    elif unit == '周':
+        return int(value * 7)
+    elif unit in ('月', '个月'):
+        return int(value * 30)
+    return 7
+
+
+def _format_days_to_readable(days: int) -> str:
+    """将天数转换为可读的时长文本"""
+    if days < 7:
+        return f"{days}天"
+    elif days < 30:
+        weeks = round(days / 7)
+        return f"{weeks}周"
+    else:
+        months = days / 30
+        if months < 1:
+            return f"{round(days / 7)}周"
+        # 四舍五入到0.5个月
+        rounded_months = round(months * 2) / 2
+        if rounded_months == int(rounded_months):
+            return f"{int(rounded_months)}个月"
+        return f"{rounded_months}个月"
+
+
+def _calculate_total_duration(phases: List[dict], deadline: str = None, created_at: str = None) -> str:
+    """
+    根据阶段信息计算总时长字符串
+    返回格式: "约X个月 (从YYYY年M月至YYYY年M月)"
+    """
+    if not phases:
+        return "待定"
+    
+    # 计算所有阶段的总天数
+    total_days = 0
+    for phase in phases:
+        duration = phase.get("duration", "")
+        total_days += _parse_phase_duration(duration)
+    
+    # 确定开始日期
+    now = datetime.now(timezone.utc)
+    start_date = now
+    if created_at:
+        try:
+            if isinstance(created_at, dict) and "$date" in created_at:
+                start_date = datetime.fromisoformat(created_at["$date"].replace("Z", "+00:00"))
+            elif isinstance(created_at, str):
+                start_date = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except:
+            start_date = now
+    
+    # 确定结束日期
+    if deadline:
+        try:
+            end_date = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+            # 使用 deadline 到 start_date 的实际天数
+            actual_days = (end_date - start_date).days
+            if actual_days > 0:
+                total_days = actual_days
+        except:
+            from datetime import timedelta
+            end_date = start_date + timedelta(days=total_days)
+    else:
+        from datetime import timedelta
+        end_date = start_date + timedelta(days=total_days)
+    
+    # 格式化时长
+    duration_text = _format_days_to_readable(total_days)
+    
+    # 格式化日期范围
+    start_year = start_date.year
+    start_month = start_date.month
+    end_year = end_date.year
+    end_month = end_date.month
+    
+    return f"约{duration_text}（从{start_year}年{start_month}月至{end_year}年{end_month}月）"
 
 
 # ==================== API 路由 ====================
@@ -242,6 +337,12 @@ async def share_plan(request: Request, body: SharePlanRequest):
     
     # 创建分享记录
     now = datetime.now(timezone.utc).isoformat()
+    
+    # 重新计算 totalDuration，使用当前时间作为起点
+    phases = plan.get("phases", [])
+    deadline = plan.get("deadline")
+    total_duration = _calculate_total_duration(phases, deadline, None)  # 使用当前时间
+    
     shared_plan = {
         "openid": openid,
         "originalPlanId": plan_id,
@@ -253,8 +354,8 @@ async def share_plan(request: Request, body: SharePlanRequest):
         "domainName": plan.get("domainName", ""),
         "dailyHours": plan.get("dailyHours", 2),
         "currentLevel": plan.get("currentLevel", "beginner"),
-        "totalDuration": plan.get("totalDuration", ""),
-        "phases": plan.get("phases", []),
+        "totalDuration": total_duration,
+        "phases": phases,
         # 作者信息
         "author": author,
         # 统计
