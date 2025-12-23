@@ -494,12 +494,19 @@ JSON格式如下：
         preferences: Optional[Dict],
     ) -> str:
         """构建学习计划生成提示词"""
+        from datetime import datetime, timezone, timedelta
+        
         prefs = cls._normalize_preferences(preferences, goal, domain)
         goal_type = prefs.get("goal_type", "skill")
         weekly_days = prefs.get("weekly_days", 6)
         modality = prefs.get("modality", "mixed")
         intensity = prefs.get("intensity", "medium")
         time_slots = prefs.get("time_slots")
+        
+        # 获取当前北京时间
+        now_utc = datetime.now(timezone.utc)
+        beijing_now = now_utc + timedelta(hours=8)
+        current_date_str = beijing_now.strftime("%Y年%m月%d日")
 
         level_desc = {
             "beginner": "零基础/入门",
@@ -529,6 +536,7 @@ JSON格式如下：
 
         prompt = f"""你是一位资深的学习规划师，请根据以下信息制定一份详细的学习计划：
 
+【当前日期】{current_date_str}（计划从今天开始执行）
 【学习目标】{goal}
 【学习领域】{domain}
 【当前水平】{level_desc.get(current_level, current_level)}
@@ -550,7 +558,7 @@ JSON格式如下：
 {{
     "goal": "学习目标",
     "domain": "学习领域",
-    "total_duration": "总时长（如：3个月）",
+    "total_duration": "总时长，必须从当前日期开始计算（如：约3个月，从{current_date_str}至xxxx年xx月）",
     "phases": [
         {{
             "name": "阶段名称（如：基础入门）",
