@@ -89,6 +89,124 @@ def _beijing_now() -> datetime:
     return datetime.now(timezone.utc) + timedelta(hours=8)
 
 
+def _parse_duration_to_days(duration: str) -> int:
+    """解析时长字符串，返回天数"""
+    if not duration:
+        return 7
+    # 提取纯时长部分（去掉括号里的日期范围）
+    pure_duration = duration.split('(')[0].split('（')[0].strip()
+    
+    match = re.search(r'(\d+(?:\.\d+)?)\s*(周|天|月|个月)', pure_duration)
+    if not match:
+        return 7
+    
+    value = float(match.group(1))
+    unit = match.group(2)
+    
+    if unit == '天':
+        return int(value)
+    elif unit == '周':
+        return int(value * 7)
+    elif unit in ('月', '个月'):
+        return int(value * 30)
+    return 7
+
+
+def _days_to_readable(days: int) -> str:
+    """将天数转换为可读的时长文本"""
+    if days < 7:
+        return f"{days}天"
+    elif days < 30:
+        weeks = round(days / 7)
+        return f"{weeks}周"
+    else:
+        months = days / 30
+        if months < 1:
+            return f"{round(days / 7)}周"
+        rounded_months = round(months * 2) / 2
+        if rounded_months == int(rounded_months):
+            return f"{int(rounded_months)}个月"
+        return f"{rounded_months}个月"
+
+
+def _calculate_phases_with_dates(phases: List[Dict], created_at: datetime, deadline_str: str = None) -> tuple:
+    """
+    计算每个阶段的具体日期范围，返回更新后的 phases 和 totalDuration
+    
+    Args:
+        phases: 阶段列表
+        created_at: 计划创建时间
+        deadline_str: 截止日期字符串
+    
+    Returns:
+        (updated_phases, total_duration_str)
+    """
+    if not phases:
+        return phases, "待定"
+    
+    # 计算每个阶段的原始天数
+    phase_days = []
+    for phase in phases:
+        days = _parse_duration_to_days(phase.get("duration", ""))
+        phase_days.append(days)
+    
+    total_original_days = sum(phase_days)
+    
+    # 解析截止日期
+    deadline_date = None
+    if deadline_str:
+        try:
+            deadline_date = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+        except:
+            pass
+    
+    # 计算实际总天数
+    if deadline_date and deadline_date > created_at:
+        actual_total_days = (deadline_date - created_at).days
+    else:
+        actual_total_days = total_original_days
+        deadline_date = created_at + timedelta(days=total_original_days)
+    
+    # 按比例分配每个阶段的实际天数
+    if total_original_days > 0:
+        actual_phase_days = [
+            max(1, round((d / total_original_days) * actual_total_days))
+            for d in phase_days
+        ]
+    else:
+        actual_phase_days = phase_days
+    
+    # 计算每个阶段的起止日期并更新 duration
+    current_date = created_at
+    updated_phases = []
+    
+    for i, phase in enumerate(phases):
+        phase_start = current_date
+        phase_end = phase_start + timedelta(days=actual_phase_days[i])
+        
+        # 格式化日期范围
+        start_str = f"{phase_start.year}年{phase_start.month}月"
+        end_str = f"{phase_end.year}年{phase_end.month}月"
+        duration_text = _days_to_readable(actual_phase_days[i])
+        
+        # 更新阶段信息
+        updated_phase = {**phase}
+        updated_phase["duration"] = f"{duration_text} ({start_str}-{end_str})"
+        updated_phase["startDate"] = phase_start.isoformat()
+        updated_phase["endDate"] = phase_end.isoformat()
+        updated_phases.append(updated_phase)
+        
+        current_date = phase_end
+    
+    # 计算总时长字符串
+    plan_start = created_at
+    plan_end = deadline_date if deadline_date else current_date
+    total_duration_text = _days_to_readable(actual_total_days)
+    total_duration = f"约{total_duration_text}（从{plan_start.year}年{plan_start.month}月至{plan_end.year}年{plan_end.month}月）"
+    
+    return updated_phases, total_duration
+
+
 def _beijing_day_range(days_offset: int = 0):
     """获取北京时间某天的 UTC 时间范围"""
     now_utc = datetime.now(timezone.utc)
@@ -299,7 +417,12 @@ async def save_plan(request: Request):
             phase["id"] = f"phase_{i+1}_{uuid.uuid4().hex[:8]}"
         phase["status"] = "completed"  # 框架已生成，后续可补充详情
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    now_str = now.isoformat()
+    
+    # 根据创建时间和截止日期计算每个阶段的具体时间范围
+    phases_with_dates, total_duration = _calculate_phases_with_dates(phases, now, deadline)
+
     new_plan = {
         "openid": openid,
         "goal": goal,
@@ -308,18 +431,18 @@ async def save_plan(request: Request):
         "deadline": deadline,
         "dailyHours": daily_hours,
         "currentLevel": current_level,
-        # 用于“更强个性化画像/计划强度节奏”
+        # 用于"更强个性化画像/计划强度节奏"
         "personalization": personalization if isinstance(personalization, dict) else {},
         "status": "active",
         "progress": 0,
         "todayProgress": 0,
         "completedDays": 0,
-        "phases": phases,
-        "totalDuration": plan_data.get("total_duration") or plan_data.get("totalDuration", ""),
+        "phases": phases_with_dates,  # 使用计算后的阶段（包含具体日期）
+        "totalDuration": total_duration,  # 使用计算后的总时长
         "dailySchedule": plan_data.get("daily_schedule") or plan_data.get("dailySchedule", []),
         "tips": plan_data.get("tips", []),
-        "createdAt": {"$date": now},
-        "updatedAt": {"$date": now},
+        "createdAt": {"$date": now_str},
+        "updatedAt": {"$date": now_str},
     }
 
     plan_id = await db.add("study_plans", new_plan)
