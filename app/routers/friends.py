@@ -906,6 +906,183 @@ async def get_reminders(request: Request):
     }
 
 
+@router.get("/supervisor/supervised/{supervised_openid}")
+async def get_supervised_detail(request: Request, supervised_openid: str):
+    """
+    获取被监督者的详细学习数据（仅监督者可访问）
+    包括：学习统计、当前计划、计划进度、今日任务、近期打卡记录、学习时长趋势等
+    """
+    openid = _get_openid_from_request(request)
+    db = get_db()
+    
+    # 验证监督关系
+    relation = await db.get_one(
+        "study_supervisors",
+        {
+            "supervisorOpenid": openid,
+            "supervisedOpenid": supervised_openid,
+            "status": "accepted",
+        }
+    )
+    
+    if not relation:
+        raise HTTPException(status_code=403, detail="你不是该用户的监督者")
+    
+    # 获取用户基本信息
+    user_info = await _get_user_info(db, supervised_openid)
+    
+    # 获取学习统计
+    stats = await _get_user_stats(db, supervised_openid)
+    
+    # 获取当前活跃计划
+    plan = await db.get_one(
+        "study_plans",
+        {"openid": supervised_openid, "status": "active"}
+    )
+    
+    plan_info = None
+    phases_progress = []
+    if plan:
+        # 兼容嵌套数据结构
+        if "data" in plan and isinstance(plan.get("data"), dict):
+            plan = {**plan.get("data"), "_id": plan.get("_id")}
+        
+        # 计算阶段进度
+        phases = plan.get("phases", [])
+        for i, phase in enumerate(phases):
+            phase_progress = {
+                "name": phase.get("name", f"阶段{i+1}"),
+                "duration": phase.get("duration", ""),
+                "status": phase.get("status", "pending"),
+                "progress": phase.get("progress", 0),
+                "goals": phase.get("goals", [])[:3],  # 只返回前3个目标
+            }
+            phases_progress.append(phase_progress)
+        
+        plan_info = {
+            "_id": str(plan.get("_id") or plan.get("id")),
+            "goal": plan.get("goal", ""),
+            "domain": plan.get("domain", ""),
+            "domainName": plan.get("domainName", ""),
+            "totalDuration": plan.get("totalDuration", ""),
+            "progress": plan.get("progress", 0),
+            "todayProgress": plan.get("todayProgress", 0),
+            "dailyHours": plan.get("dailyHours", 2),
+            "createdAt": plan.get("createdAt"),
+            "phases": phases_progress,
+            "currentPhaseIndex": next((i for i, p in enumerate(phases) if p.get("status") == "current"), 0),
+        }
+    
+    # 获取今日任务
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_tasks = await db.query(
+        "plan_tasks",
+        {
+            "openid": supervised_openid,
+            "dateStr": today,
+        },
+        limit=20,
+        order_by="order",
+    )
+    
+    tasks_info = []
+    for t in today_tasks:
+        tasks_info.append({
+            "title": t.get("title", ""),
+            "duration": t.get("duration", ""),
+            "completed": t.get("completed", False),
+            "phase": t.get("phase", ""),
+            "order": t.get("order", 0),
+        })
+    
+    total_tasks = len(tasks_info)
+    completed_tasks = len([t for t in tasks_info if t.get("completed")])
+    
+    # 获取近7天打卡记录
+    from datetime import timedelta
+    checkin_records = []
+    for i in range(7):
+        date = datetime.now(timezone.utc) - timedelta(days=i)
+        date_str = date.strftime("%Y-%m-%d")
+        
+        checkin = await db.get_one(
+            "checkin_records",
+            {
+                "openid": supervised_openid,
+                "dateStr": date_str,
+            }
+        )
+        
+        # 如果没有打卡记录，检查任务完成情况
+        if not checkin:
+            day_tasks = await db.query(
+                "plan_tasks",
+                {
+                    "openid": supervised_openid,
+                    "dateStr": date_str,
+                },
+                limit=20,
+            )
+            has_completed = any(t.get("completed") for t in day_tasks)
+            checkin_records.append({
+                "date": date_str,
+                "checked": has_completed,
+                "studyMinutes": 0,
+                "note": "",
+            })
+        else:
+            checkin_records.append({
+                "date": date_str,
+                "checked": True,
+                "studyMinutes": checkin.get("studyMinutes", 0),
+                "note": checkin.get("note", ""),
+                "mood": checkin.get("mood", ""),
+            })
+    
+    # 获取本周学习时长统计
+    week_start = datetime.now(timezone.utc) - timedelta(days=datetime.now(timezone.utc).weekday())
+    week_start_str = week_start.strftime("%Y-%m-%d")
+    
+    week_checkins = await db.query(
+        "checkin_records",
+        {
+            "openid": supervised_openid,
+            "dateStr": {"$gte": week_start_str},
+        },
+        limit=7,
+    )
+    
+    week_study_minutes = sum(c.get("studyMinutes", 0) for c in week_checkins)
+    
+    # 获取监督关系信息
+    relation_info = {
+        "_id": str(relation.get("_id") or relation.get("id")),
+        "createdAt": relation.get("createdAt"),
+        "acceptedAt": relation.get("acceptedAt"),
+        "settings": relation.get("settings", {}),
+    }
+    
+    return {
+        "success": True,
+        "data": {
+            "userInfo": user_info,
+            "stats": {
+                **stats,
+                "weekStudyMinutes": week_study_minutes,
+            },
+            "plan": plan_info,
+            "todayTasks": {
+                "total": total_tasks,
+                "completed": completed_tasks,
+                "rate": round(completed_tasks / total_tasks * 100) if total_tasks > 0 else 0,
+                "tasks": tasks_info,
+            },
+            "recentCheckins": checkin_records,
+            "relation": relation_info,
+        }
+    }
+
+
 # ==================== 学伴 API ====================
 
 @router.post("/buddy/invite")
