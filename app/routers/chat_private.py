@@ -18,6 +18,24 @@ from ..db.wxcloud import get_db
 
 router = APIRouter(prefix="/api/chat/private", tags=["私聊消息"])
 
+# WebSocket 通知函数（延迟导入避免循环依赖）
+async def _notify_new_message(message: dict, sender_openid: str, receiver_openid: str):
+    """通过 WebSocket 通知新消息"""
+    try:
+        from .websocket import notify_new_message
+        await notify_new_message(message, sender_openid, receiver_openid)
+    except Exception as e:
+        print(f"[WebSocket] 通知失败: {e}")
+
+
+async def _notify_message_recalled(chat_id: str, message_id: str, participants: list):
+    """通过 WebSocket 通知消息撤回"""
+    try:
+        from .websocket import notify_message_recalled
+        await notify_message_recalled(chat_id, message_id, participants)
+    except Exception as e:
+        print(f"[WebSocket] 撤回通知失败: {e}")
+
 
 # ==================== 请求/响应模型 ====================
 
@@ -337,6 +355,9 @@ async def send_message(request: Request, body: SendMessageRequest):
     # 获取发送者信息
     sender_info = await _get_user_info(db, openid)
     message["senderInfo"] = sender_info
+    
+    # 通过 WebSocket 实时推送给接收者
+    await _notify_new_message(message, openid, receiver_openid)
     
     return {
         "success": True,
@@ -757,7 +778,7 @@ async def recall_message(request: Request, body: RecallMessageRequest):
         last_msg = chat.get("lastMessage", {})
         # 简单检查：如果最后消息是撤回的消息（通过发送者判断）
         if last_msg and last_msg.get("senderOpenid") == openid:
-            await db.update_by_id(
+                await db.update_by_id(
                 "private_chats",
                 chat_id,
                 {
@@ -769,6 +790,10 @@ async def recall_message(request: Request, body: RecallMessageRequest):
                     "updatedAt": {"$date": now_str},
                 }
             )
+    
+    # 通过 WebSocket 通知消息撤回
+    if chat:
+        await _notify_message_recalled(chat_id, message_id, chat.get("participants", []))
     
     return {
         "success": True,

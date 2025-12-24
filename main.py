@@ -23,6 +23,7 @@ from app.routers.mistakes import router as mistakes_router
 from app.routers.community import router as community_router
 from app.routers.friends import router as friends_router
 from app.routers.chat_private import router as chat_private_router
+from app.routers.websocket import router as websocket_router
 
 
 @asynccontextmanager
@@ -89,6 +90,7 @@ app.include_router(mistakes_router)  # 错题本 CRUD（替代云函数）
 app.include_router(community_router)  # 学习社区路由
 app.include_router(friends_router)  # 学友系统路由
 app.include_router(chat_private_router)  # 私聊消息路由
+app.include_router(websocket_router)  # WebSocket 实时消息路由
 
 
 # ==================== 基础端点 ====================
@@ -323,6 +325,12 @@ async def api_info():
                 "path": "/api/chat/private/unread-count",
                 "methods": ["GET"],
                 "description": "获取未读消息数",
+            },
+            # WebSocket
+            "websocket_chat": {
+                "path": "/ws/chat",
+                "methods": ["WebSocket"],
+                "description": "实时消息 WebSocket 连接（需要 openid 参数）",
             },
         },
     }
