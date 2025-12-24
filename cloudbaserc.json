@@ -1,0 +1,6 @@
+{
+  "envId": "cloud1-9g0y2l6r59f1978b",
+  "cloudrun": {
+    "name": "fastapi"
+  }
+}
