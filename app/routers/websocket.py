@@ -6,6 +6,10 @@ WebSocket 实时消息通道
 - 实时消息推送
 - 未读消息数更新
 - 已读状态同步
+- 学友请求通知
+- 监督/学伴邀请通知
+- 监督提醒推送
+- 社区互动通知（点赞、评论）
 """
 import json
 import asyncio
@@ -308,4 +312,272 @@ async def notify_message_recalled(chat_id: str, message_id: str, participants: l
 def get_connection_manager() -> ConnectionManager:
     """获取连接管理器实例"""
     return manager
+
+
+# ==================== 学习社区实时通知 ====================
+
+async def notify_friend_request(from_openid: str, to_openid: str, friendship: dict):
+    """
+    通知新的学友请求
+    
+    Args:
+        from_openid: 发送请求的用户
+        to_openid: 接收请求的用户
+        friendship: 好友关系数据
+    """
+    db = get_db()
+    from_user = await get_user_info(db, from_openid)
+    
+    await manager.send_to_user(to_openid, {
+        "type": "friend_request",
+        "data": {
+            "friendshipId": str(friendship.get("_id") or friendship.get("id")),
+            "fromUser": from_user,
+            "remark": friendship.get("remark", ""),
+            "createdAt": friendship.get("createdAt"),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def notify_friend_request_handled(friendship_id: str, handler_openid: str, requester_openid: str, action: str):
+    """
+    通知学友请求处理结果
+    
+    Args:
+        friendship_id: 好友关系ID
+        handler_openid: 处理请求的用户
+        requester_openid: 发起请求的用户
+        action: accept 或 reject
+    """
+    db = get_db()
+    handler_info = await get_user_info(db, handler_openid)
+    
+    await manager.send_to_user(requester_openid, {
+        "type": "friend_request_handled",
+        "data": {
+            "friendshipId": friendship_id,
+            "handler": handler_info,
+            "action": action,
+            "accepted": action == "accept",
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def notify_supervisor_invite(from_openid: str, to_openid: str, relation: dict):
+    """
+    通知监督邀请
+    
+    Args:
+        from_openid: 发起邀请的用户（被监督者）
+        to_openid: 被邀请的用户（监督者）
+        relation: 监督关系数据
+    """
+    db = get_db()
+    from_user = await get_user_info(db, from_openid)
+    
+    await manager.send_to_user(to_openid, {
+        "type": "supervisor_invite",
+        "data": {
+            "relationId": str(relation.get("_id") or relation.get("id")),
+            "fromUser": from_user,
+            "message": relation.get("inviteMessage", ""),
+            "planId": relation.get("planId"),
+            "createdAt": relation.get("createdAt"),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def notify_supervisor_invite_handled(relation_id: str, handler_openid: str, inviter_openid: str, action: str):
+    """
+    通知监督邀请处理结果
+    """
+    db = get_db()
+    handler_info = await get_user_info(db, handler_openid)
+    
+    await manager.send_to_user(inviter_openid, {
+        "type": "supervisor_invite_handled",
+        "data": {
+            "relationId": relation_id,
+            "handler": handler_info,
+            "action": action,
+            "accepted": action == "accept",
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def notify_buddy_invite(from_openid: str, to_openid: str, relation: dict, plan: dict = None):
+    """
+    通知学伴邀请
+    
+    Args:
+        from_openid: 发起邀请的用户（计划所有者）
+        to_openid: 被邀请的用户（学伴）
+        relation: 学伴关系数据
+        plan: 计划信息
+    """
+    db = get_db()
+    from_user = await get_user_info(db, from_openid)
+    
+    plan_info = None
+    if plan:
+        plan_info = {
+            "goal": plan.get("goal", ""),
+            "domain": plan.get("domain", ""),
+            "domainName": plan.get("domainName", ""),
+            "totalDuration": plan.get("totalDuration", ""),
+        }
+    
+    await manager.send_to_user(to_openid, {
+        "type": "buddy_invite",
+        "data": {
+            "relationId": str(relation.get("_id") or relation.get("id")),
+            "fromUser": from_user,
+            "message": relation.get("inviteMessage", ""),
+            "plan": plan_info,
+            "createdAt": relation.get("createdAt"),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def notify_buddy_invite_handled(relation_id: str, handler_openid: str, inviter_openid: str, action: str):
+    """
+    通知学伴邀请处理结果
+    """
+    db = get_db()
+    handler_info = await get_user_info(db, handler_openid)
+    
+    await manager.send_to_user(inviter_openid, {
+        "type": "buddy_invite_handled",
+        "data": {
+            "relationId": relation_id,
+            "handler": handler_info,
+            "action": action,
+            "accepted": action == "accept",
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def notify_supervisor_reminder(supervisor_openid: str, supervised_openid: str, reminder: dict):
+    """
+    通知监督提醒（实时推送给被监督者）
+    
+    Args:
+        supervisor_openid: 监督者
+        supervised_openid: 被监督者
+        reminder: 提醒内容
+    """
+    db = get_db()
+    supervisor_info = await get_user_info(db, supervisor_openid)
+    
+    reminder_type_text = {
+        "daily_checkin": "打卡提醒",
+        "task_progress": "学习进度提醒",
+        "encouragement": "加油鼓励",
+    }
+    
+    await manager.send_to_user(supervised_openid, {
+        "type": "supervisor_reminder",
+        "data": {
+            "reminderId": str(reminder.get("_id") or reminder.get("id")),
+            "supervisor": supervisor_info,
+            "reminderType": reminder.get("reminderType"),
+            "reminderTypeText": reminder_type_text.get(reminder.get("reminderType"), "提醒"),
+            "content": reminder.get("content"),
+            "createdAt": reminder.get("createdAt"),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def notify_community_like(liker_openid: str, plan_owner_openid: str, plan: dict):
+    """
+    通知社区计划被点赞
+    
+    Args:
+        liker_openid: 点赞的用户
+        plan_owner_openid: 计划所有者
+        plan: 计划信息
+    """
+    # 不通知自己给自己点赞
+    if liker_openid == plan_owner_openid:
+        return
+    
+    db = get_db()
+    liker_info = await get_user_info(db, liker_openid)
+    
+    await manager.send_to_user(plan_owner_openid, {
+        "type": "community_like",
+        "data": {
+            "liker": liker_info,
+            "planId": str(plan.get("_id") or plan.get("id")),
+            "planTitle": plan.get("title") or plan.get("goal", ""),
+            "likeCount": plan.get("likeCount", 0),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def notify_community_comment(commenter_openid: str, plan_owner_openid: str, plan: dict, comment: dict):
+    """
+    通知社区计划收到评论
+    
+    Args:
+        commenter_openid: 评论的用户
+        plan_owner_openid: 计划所有者
+        plan: 计划信息
+        comment: 评论内容
+    """
+    # 不通知自己给自己评论
+    if commenter_openid == plan_owner_openid:
+        return
+    
+    db = get_db()
+    commenter_info = await get_user_info(db, commenter_openid)
+    
+    await manager.send_to_user(plan_owner_openid, {
+        "type": "community_comment",
+        "data": {
+            "commenter": commenter_info,
+            "planId": str(plan.get("_id") or plan.get("id")),
+            "planTitle": plan.get("title") or plan.get("goal", ""),
+            "commentId": str(comment.get("_id") or comment.get("id")),
+            "content": comment.get("content", "")[:50],  # 只发送前50字
+            "commentCount": plan.get("commentCount", 0),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+async def notify_plan_used(user_openid: str, plan_owner_openid: str, plan: dict):
+    """
+    通知社区计划被使用
+    
+    Args:
+        user_openid: 使用计划的用户
+        plan_owner_openid: 计划所有者
+        plan: 计划信息
+    """
+    # 不通知自己使用自己的计划
+    if user_openid == plan_owner_openid:
+        return
+    
+    db = get_db()
+    user_info = await get_user_info(db, user_openid)
+    
+    await manager.send_to_user(plan_owner_openid, {
+        "type": "plan_used",
+        "data": {
+            "user": user_info,
+            "planId": str(plan.get("_id") or plan.get("id")),
+            "planTitle": plan.get("title") or plan.get("goal", ""),
+            "useCount": plan.get("useCount", 0),
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
 

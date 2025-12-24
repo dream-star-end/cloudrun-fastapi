@@ -17,6 +17,11 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..db.wxcloud import get_db, PlanRepository
+from .websocket import (
+    notify_community_like,
+    notify_community_comment,
+    notify_plan_used,
+)
 
 router = APIRouter(prefix="/api/community", tags=["学习社区"])
 
@@ -298,6 +303,9 @@ async def toggle_like(request: Request, body: LikeRequest):
     if not plan:
         raise HTTPException(status_code=404, detail="计划不存在")
     
+    # 获取计划所有者
+    plan_owner_openid = plan.get("openid")
+    
     # 检查是否已点赞
     existing_like = await db.get_one(
         "community_likes",
@@ -315,11 +323,15 @@ async def toggle_like(request: Request, body: LikeRequest):
                 "createdAt": {"$date": now},
             })
             # 更新计划点赞数
+            new_like_count = (plan.get("likeCount") or 0) + 1
             await db.update_by_id(
                 "shared_plans",
                 plan_id,
-                {"likeCount": (plan.get("likeCount") or 0) + 1}
+                {"likeCount": new_like_count}
             )
+            # WebSocket 通知计划所有者（仅点赞时通知，取消点赞不通知）
+            plan["likeCount"] = new_like_count
+            await notify_community_like(openid, plan_owner_openid, plan)
     else:
         # 取消点赞
         if existing_like:
@@ -396,6 +408,9 @@ async def add_comment(request: Request, body: CommentRequest):
     if not plan:
         raise HTTPException(status_code=404, detail="计划不存在")
     
+    # 获取计划所有者
+    plan_owner_openid = plan.get("openid")
+    
     # 获取用户信息
     author = await _get_user_info(db, openid)
     
@@ -414,11 +429,16 @@ async def add_comment(request: Request, body: CommentRequest):
     comment["_id"] = comment_id
     
     # 更新计划评论数
+    new_comment_count = (plan.get("commentCount") or 0) + 1
     await db.update_by_id(
         "shared_plans",
         plan_id,
-        {"commentCount": (plan.get("commentCount") or 0) + 1}
+        {"commentCount": new_comment_count}
     )
+    
+    # WebSocket 通知计划所有者
+    plan["commentCount"] = new_comment_count
+    await notify_community_comment(openid, plan_owner_openid, plan, comment)
     
     return {
         "success": True,
@@ -507,11 +527,16 @@ async def use_plan(request: Request, body: UsePlanRequest):
     new_plan["_id"] = new_plan_id
     
     # 更新分享计划的使用次数
+    new_use_count = (shared_plan.get("useCount") or 0) + 1
     await db.update_by_id(
         "shared_plans",
         plan_id,
-        {"useCount": (shared_plan.get("useCount") or 0) + 1}
+        {"useCount": new_use_count}
     )
+    
+    # WebSocket 通知计划所有者
+    shared_plan["useCount"] = new_use_count
+    await notify_plan_used(openid, shared_plan.get("openid"), shared_plan)
     
     return {
         "success": True,

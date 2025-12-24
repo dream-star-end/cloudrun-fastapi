@@ -18,6 +18,15 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..db.wxcloud import get_db
+from .websocket import (
+    notify_friend_request,
+    notify_friend_request_handled,
+    notify_supervisor_invite,
+    notify_supervisor_invite_handled,
+    notify_buddy_invite,
+    notify_buddy_invite_handled,
+    notify_supervisor_reminder,
+)
 
 router = APIRouter(prefix="/api/friends", tags=["学友系统"])
 
@@ -253,6 +262,9 @@ async def add_friend(request: Request, body: AddFriendRequest):
     friendship_id = await db.add("friendships", friendship)
     friendship["_id"] = friendship_id
     
+    # WebSocket 实时通知对方
+    await notify_friend_request(openid, friend_openid, friendship)
+    
     return {
         "success": True,
         "message": "好友请求已发送",
@@ -372,6 +384,9 @@ async def handle_friend_request(request: Request, body: HandleFriendRequest):
     if friendship.get("status") != "pending":
         raise HTTPException(status_code=400, detail="该请求已处理")
     
+    # 获取请求发起者的 openid
+    requester_openid = friendship.get("openid")
+    
     now = datetime.now(timezone.utc).isoformat()
     
     if action == "accept":
@@ -384,6 +399,8 @@ async def handle_friend_request(request: Request, body: HandleFriendRequest):
                 "updatedAt": {"$date": now},
             }
         )
+        # WebSocket 通知请求发起者
+        await notify_friend_request_handled(friendship_id, openid, requester_openid, action)
         return {
             "success": True,
             "message": "已添加学友",
@@ -397,6 +414,8 @@ async def handle_friend_request(request: Request, body: HandleFriendRequest):
                 "updatedAt": {"$date": now},
             }
         )
+        # WebSocket 通知请求发起者
+        await notify_friend_request_handled(friendship_id, openid, requester_openid, action)
         return {
             "success": True,
             "message": "已拒绝",
@@ -570,6 +589,9 @@ async def invite_supervisor(request: Request, body: InviteSupervisorRequest):
     relation_id = await db.add("study_supervisors", relation)
     relation["_id"] = relation_id
     
+    # WebSocket 实时通知被邀请的监督者
+    await notify_supervisor_invite(openid, friend_openid, relation)
+    
     return {
         "success": True,
         "message": "监督邀请已发送",
@@ -690,6 +712,9 @@ async def handle_supervisor_request(request: Request, body: HandleSupervisorRequ
     if relation.get("status") != "pending":
         raise HTTPException(status_code=400, detail="该邀请已处理")
     
+    # 获取邀请发起者（被监督者）的 openid
+    inviter_openid = relation.get("supervisedOpenid")
+    
     now = datetime.now(timezone.utc).isoformat()
     
     if action == "accept":
@@ -701,6 +726,8 @@ async def handle_supervisor_request(request: Request, body: HandleSupervisorRequ
                 "acceptedAt": {"$date": now},
             }
         )
+        # WebSocket 通知邀请发起者
+        await notify_supervisor_invite_handled(relation_id, openid, inviter_openid, action)
         return {
             "success": True,
             "message": "已成为监督者",
@@ -711,6 +738,8 @@ async def handle_supervisor_request(request: Request, body: HandleSupervisorRequ
             relation_id,
             {"status": "rejected"}
         )
+        # WebSocket 通知邀请发起者
+        await notify_supervisor_invite_handled(relation_id, openid, inviter_openid, action)
         return {
             "success": True,
             "message": "已拒绝",
@@ -867,6 +896,9 @@ async def send_reminder(request: Request, body: SendReminderRequest):
             "updatedAt": {"$date": now},
         }
     )
+    
+    # WebSocket 实时推送监督提醒给被监督者
+    await notify_supervisor_reminder(openid, supervised_openid, reminder)
     
     return {
         "success": True,
@@ -1167,6 +1199,9 @@ async def invite_buddy(request: Request, body: InviteBuddyRequest):
         "totalDuration": plan.get("totalDuration", ""),
     }
     
+    # WebSocket 实时通知被邀请的学伴
+    await notify_buddy_invite(openid, friend_openid, relation, plan)
+    
     return {
         "success": True,
         "message": "学伴邀请已发送",
@@ -1296,6 +1331,9 @@ async def handle_buddy_request(request: Request, body: HandleBuddyRequest):
     if relation.get("status") != "pending":
         raise HTTPException(status_code=400, detail="该邀请已处理")
     
+    # 获取邀请发起者（计划所有者）的 openid
+    inviter_openid = relation.get("planOwnerOpenid")
+    
     now = datetime.now(timezone.utc).isoformat()
     
     if action == "accept":
@@ -1350,6 +1388,8 @@ async def handle_buddy_request(request: Request, body: HandleBuddyRequest):
             
             await db.add("study_plans", new_plan)
         
+        # WebSocket 通知邀请发起者
+        await notify_buddy_invite_handled(relation_id, openid, inviter_openid, action)
         return {
             "success": True,
             "message": "已加入学习计划",
@@ -1360,6 +1400,8 @@ async def handle_buddy_request(request: Request, body: HandleBuddyRequest):
             relation_id,
             {"status": "rejected"}
         )
+        # WebSocket 通知邀请发起者
+        await notify_buddy_invite_handled(relation_id, openid, inviter_openid, action)
         return {
             "success": True,
             "message": "已拒绝",
