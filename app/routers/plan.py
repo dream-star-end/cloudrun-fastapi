@@ -13,12 +13,15 @@
 import json
 import re
 import uuid
+import httpx
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
+from ..config import settings
 from ..db.wxcloud import get_db, PlanRepository
 from ..models import (
     AnalyzeMistakeRequest,
@@ -318,6 +321,56 @@ def _calculate_remaining_days(plan: Dict[str, Any]) -> Optional[int]:
 
 
 # ==================== 计划管理 API ====================
+
+
+class LoginRequest(BaseModel):
+    """登录请求"""
+    code: str
+
+
+@router.post("/login")
+async def login(body: LoginRequest):
+    """
+    通过 wx.login() 的 code 换取 openid
+    多端应用模式下使用此接口获取用户身份
+    """
+    if not settings.WX_APPID or not settings.WX_SECRET:
+        raise HTTPException(
+            status_code=500,
+            detail="服务端未配置微信小程序凭证（WX_APPID/WX_SECRET）"
+        )
+    
+    # 调用微信 code2session 接口
+    url = "https://api.weixin.qq.com/sns/jscode2session"
+    params = {
+        "appid": settings.WX_APPID,
+        "secret": settings.WX_SECRET,
+        "js_code": body.code,
+        "grant_type": "authorization_code"
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, params=params)
+            data = resp.json()
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=500, detail=f"请求微信接口失败: {str(e)}")
+    
+    if "errcode" in data and data["errcode"] != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"微信登录失败: {data.get('errmsg', '未知错误')} ({data.get('errcode')})"
+        )
+    
+    openid = data.get("openid")
+    if not openid:
+        raise HTTPException(status_code=400, detail="获取 openid 失败")
+    
+    return {
+        "success": True,
+        "openid": openid,
+        "session_key": data.get("session_key"),  # 可选返回，用于解密用户信息
+    }
 
 
 @router.get("/whoami")
