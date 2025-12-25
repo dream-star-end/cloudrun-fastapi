@@ -5,19 +5,17 @@
 Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 9.5
 """
 
-import httpx
-import json
 import logging
 from typing import Optional, Dict, Any, List, AsyncGenerator
 from enum import Enum
 
-from ..config import settings, get_http_client_kwargs
+from ..config import settings
 from .model_config_service import ModelConfigService
 from .ai_service import AIService
+from .model_dispatchers import ModelDispatcher
 from ..utils.error_logger import (
     log_model_error,
     log_config_error,
-    log_stream_error,
     set_request_context,
     generate_request_id,
 )
@@ -158,6 +156,9 @@ class ModelRouter:
         # 调用模型（带降级）
         fallback_config = cls._get_fallback_config()
         
+        # 提取语音 URL（用于 Gemini 音频理解）
+        voice_url = message.get("voice_url") if msg_type == MessageType.VOICE else None
+        
         try:
             async for event in cls._call_with_fallback(
                 primary_config=model_config,
@@ -166,6 +167,7 @@ class ModelRouter:
                 stream=stream,
                 msg_type=msg_type,
                 openid=openid,
+                voice_url=voice_url,
             ):
                 yield event
         except Exception as e:
@@ -190,6 +192,7 @@ class ModelRouter:
         stream: bool,
         msg_type: MessageType,
         openid: str = None,
+        voice_url: str = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         带降级的模型调用
@@ -201,6 +204,7 @@ class ModelRouter:
             stream: 是否流式
             msg_type: 消息类型
             openid: 用户标识（用于错误日志）
+            voice_url: 语音文件URL（用于音频理解）
             
         Yields:
             流式响应事件
@@ -232,6 +236,7 @@ class ModelRouter:
                 stream=stream,
                 msg_type=msg_type,
                 openid=openid,
+                voice_url=voice_url,
             ):
                 if used_fallback and chunk.get("type") == "text":
                     # 第一个文本块时标记使用了降级
@@ -273,6 +278,7 @@ class ModelRouter:
                 stream=stream,
                 msg_type=msg_type,
                 openid=openid,
+                voice_url=voice_url,
             ):
                 yield chunk
     
@@ -284,9 +290,10 @@ class ModelRouter:
         stream: bool,
         msg_type: MessageType,
         openid: str = None,
+        voice_url: str = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        调用模型 API
+        调用模型 API（使用分发器模式）
         
         Args:
             config: 模型配置
@@ -294,14 +301,14 @@ class ModelRouter:
             stream: 是否流式
             msg_type: 消息类型
             openid: 用户标识（用于错误日志）
+            voice_url: 语音文件URL（用于音频理解）
             
         Yields:
             流式响应事件
         """
-        base_url = config["base_url"]
-        api_key = config["api_key"]
         model = config["model"]
         platform = config.get("platform", "unknown")
+        base_url = config["base_url"]
         
         # ========== 详细日志：API 调用 ==========
         logger.info(f"[ModelRouter] 🌐 开始调用模型 API")
@@ -310,211 +317,26 @@ class ModelRouter:
         logger.info(f"  - base_url: {base_url}")
         logger.info(f"  - stream: {stream}")
         logger.info(f"  - messages_count: {len(messages)}")
+        logger.info(f"  - has_voice_url: {bool(voice_url)}")
         
-        request_body = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 4000,
-            "stream": stream,
-        }
+        # 获取分发器
+        has_voice = msg_type == MessageType.VOICE and voice_url
+        dispatcher = ModelDispatcher.get_dispatcher(platform, model, has_voice)
         
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
+        logger.info(f"[ModelRouter] 📤 使用分发器: {type(dispatcher).__name__}")
         
-        # 日志中脱敏显示 API Key
-        logger.info(f"[ModelRouter] 📤 发送请求到: {base_url}/chat/completions")
-        logger.info(f"  - Authorization: Bearer {api_key[:8]}***" if api_key else "  - Authorization: Bearer (empty)")
-        
-        if stream:
-            async for event in cls._stream_request(
-                base_url, headers, request_body, 
-                platform=platform, model=model, openid=openid
-            ):
-                yield event
-        else:
-            result = await cls._non_stream_request(
-                base_url, headers, request_body,
-                platform=platform, model=model, openid=openid
-            )
-            yield result
+        # 调用分发器
+        async for event in dispatcher.call(
+            config=config,
+            messages=messages,
+            stream=stream,
+            openid=openid,
+            voice_url=voice_url,
+        ):
+            yield event
     
-    @classmethod
-    async def _stream_request(
-        cls,
-        base_url: str,
-        headers: Dict[str, str],
-        request_body: Dict[str, Any],
-        platform: str = "unknown",
-        model: str = "unknown",
-        openid: str = None,
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        流式请求（带中断处理和部分内容保留）
-        
-        Requirements: 9.4
-        """
-        partial_content_length = 0
-        chunk_count = 0
-        
-        try:
-            async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
-                logger.info(f"[ModelRouter] 🔗 建立流式连接...")
-                
-                async with client.stream(
-                    "POST",
-                    f"{base_url}/chat/completions",
-                    headers=headers,
-                    json=request_body,
-                ) as response:
-                    logger.info(f"[ModelRouter] 📥 收到响应: status={response.status_code}")
-                    
-                    if response.status_code != 200:
-                        error_text = ""
-                        async for chunk in response.aiter_text():
-                            error_text += chunk
-                            if len(error_text) > 500:
-                                break
-                        
-                        logger.error(f"[ModelRouter] ❌ API 错误: status={response.status_code}")
-                        logger.error(f"[ModelRouter] 错误内容: {error_text[:200]}")
-                        
-                        log_model_error(
-                            message=f"模型 API 错误",
-                            platform=platform,
-                            model=model,
-                            openid=openid,
-                            status_code=response.status_code,
-                            response_body=error_text,
-                        )
-                        raise ValueError(f"模型 API 错误 ({response.status_code})")
-                    
-                    logger.info(f"[ModelRouter] ✅ 开始接收流式数据...")
-                    
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            data_str = line[6:]
-                            if data_str == "[DONE]":
-                                logger.info(f"[ModelRouter] 🏁 流式响应完成: 共 {chunk_count} 个数据块, {partial_content_length} 字符")
-                                yield {"type": "done"}
-                                break
-                            
-                            try:
-                                data = json.loads(data_str)
-                                if data.get("choices") and data["choices"][0].get("delta"):
-                                    content = data["choices"][0]["delta"].get("content", "")
-                                    if content:
-                                        chunk_count += 1
-                                        partial_content_length += len(content)
-                                        
-                                        # 每 10 个块打印一次进度
-                                        if chunk_count % 10 == 0:
-                                            logger.debug(f"[ModelRouter] 📊 进度: {chunk_count} 块, {partial_content_length} 字符")
-                                        
-                                        yield {"type": "text", "content": content}
-                            except json.JSONDecodeError:
-                                continue
-                                
-        except httpx.ReadTimeout as e:
-            # 流式读取超时
-            logger.error(f"[ModelRouter] ⏰ 流式响应超时: 已接收 {partial_content_length} 字符")
-            log_stream_error(
-                message=f"流式响应超时: {e}",
-                openid=openid,
-                partial_content_length=partial_content_length,
-                exception=e,
-            )
-            # 如果已有部分内容，发送中断通知而不是抛出错误
-            if partial_content_length > 0:
-                yield {
-                    "type": "stream_interrupted",
-                    "message": "响应超时，已显示部分内容",
-                    "partial_content_length": partial_content_length,
-                }
-                yield {"type": "done"}
-            else:
-                raise
-                
-        except httpx.ReadError as e:
-            # 流式读取错误（网络中断等）
-            logger.error(f"[ModelRouter] 🔌 流式响应中断: 已接收 {partial_content_length} 字符")
-            log_stream_error(
-                message=f"流式响应中断: {e}",
-                openid=openid,
-                partial_content_length=partial_content_length,
-                exception=e,
-            )
-            # 如果已有部分内容，发送中断通知
-            if partial_content_length > 0:
-                yield {
-                    "type": "stream_interrupted",
-                    "message": "连接中断，已显示部分内容",
-                    "partial_content_length": partial_content_length,
-                }
-                yield {"type": "done"}
-            else:
-                raise
-                
-        except Exception as e:
-            # 其他异常
-            logger.error(f"[ModelRouter] ❌ 流式响应异常: {type(e).__name__}: {e}")
-            if partial_content_length > 0:
-                log_stream_error(
-                    message=f"流式响应异常: {type(e).__name__}: {e}",
-                    openid=openid,
-                    partial_content_length=partial_content_length,
-                    exception=e,
-                )
-                yield {
-                    "type": "stream_interrupted",
-                    "message": "响应异常，已显示部分内容",
-                    "partial_content_length": partial_content_length,
-                }
-                yield {"type": "done"}
-            else:
-                raise
-    
-    @classmethod
-    async def _non_stream_request(
-        cls,
-        base_url: str,
-        headers: Dict[str, str],
-        request_body: Dict[str, Any],
-        platform: str = "unknown",
-        model: str = "unknown",
-        openid: str = None,
-    ) -> Dict[str, Any]:
-        """
-        非流式请求
-        """
-        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers=headers,
-                json=request_body,
-            )
-            
-            if response.status_code != 200:
-                error_text = response.text[:500] if response.text else "无响应内容"
-                log_model_error(
-                    message=f"模型 API 错误",
-                    platform=platform,
-                    model=model,
-                    openid=openid,
-                    status_code=response.status_code,
-                    response_body=error_text,
-                )
-                raise ValueError(f"模型 API 错误 ({response.status_code})")
-            
-            data = response.json()
-            
-            if data.get("choices") and data["choices"][0].get("message"):
-                content = data["choices"][0]["message"]["content"]
-                return {"type": "text", "content": content}
-            
-            raise ValueError("模型返回格式错误")
+    # 注意：流式和非流式请求逻辑已移至 model_dispatchers.py 中的各分发器类
+    # OpenAICompatibleDispatcher, GeminiDispatcher, GeminiAudioDispatcher 等
     
     @classmethod
     def _build_messages(
