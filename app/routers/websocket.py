@@ -13,10 +13,15 @@ WebSocket 实时消息通道
 """
 import json
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Dict, Set, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
 from ..db.wxcloud import get_db
+
+# 配置日志
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 router = APIRouter(prefix="/ws", tags=["WebSocket"])
 
@@ -36,7 +41,14 @@ class ConnectionManager:
     
     async def connect(self, websocket: WebSocket, openid: str):
         """接受新连接"""
-        await websocket.accept()
+        logger.info(f"[WebSocket] 开始接受连接: openid={openid[:8]}...")
+        try:
+            await websocket.accept()
+            logger.info(f"[WebSocket] accept() 完成: openid={openid[:8]}...")
+        except Exception as e:
+            logger.error(f"[WebSocket] accept() 失败: openid={openid[:8]}..., error={type(e).__name__}: {e}")
+            raise
+        
         was_offline = openid not in self.active_connections or len(self.active_connections.get(openid, set())) == 0
         
         async with self._lock:
@@ -46,7 +58,7 @@ class ConnectionManager:
             self.connection_user[websocket] = openid
             self.last_active_time[openid] = datetime.now(timezone.utc)
         
-        print(f"[WebSocket] 用户 {openid[:8]}... 已连接，当前连接数: {len(self.active_connections[openid])}")
+        logger.info(f"[WebSocket] 用户 {openid[:8]}... 已连接，当前连接数: {len(self.active_connections[openid])}, 总在线用户: {len(self.active_connections)}")
         
         # 如果用户从离线变为在线，通知其学友
         if was_offline:
@@ -68,7 +80,7 @@ class ConnectionManager:
                         # 更新最后活跃时间
                         self.last_active_time[openid] = datetime.now(timezone.utc)
                 del self.connection_user[websocket]
-                print(f"[WebSocket] 用户 {openid[:8]}... 已断开")
+                logger.info(f"[WebSocket] 用户 {openid[:8]}... 已断开, 完全离线: {is_now_offline}, 剩余在线用户: {len(self.active_connections)}")
         
         # 如果用户完全离线，通知其学友
         if openid and is_now_offline:
@@ -77,6 +89,7 @@ class ConnectionManager:
     async def _notify_friends_online_status(self, openid: str, is_online: bool):
         """通知用户的学友其在线状态变化"""
         try:
+            logger.debug(f"[WebSocket] 通知学友在线状态: openid={openid[:8]}..., is_online={is_online}")
             db = get_db()
             # 获取用户的所有学友
             friendships = await db.query(
@@ -89,6 +102,7 @@ class ConnectionManager:
                 },
                 limit=500,
             )
+            logger.debug(f"[WebSocket] 找到 {len(friendships)} 个学友关系")
             
             # 获取用户信息
             user_info = await get_user_info(db, openid)
@@ -96,6 +110,7 @@ class ConnectionManager:
             last_active_str = last_active.isoformat() if last_active else None
             
             # 通知每个在线的学友
+            notified_count = 0
             for f in friendships:
                 friend_openid = f.get("friendOpenid") if f.get("openid") == openid else f.get("openid")
                 if friend_openid and self.is_user_online(friend_openid):
@@ -109,23 +124,29 @@ class ConnectionManager:
                         },
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     })
+                    notified_count += 1
+            logger.debug(f"[WebSocket] 已通知 {notified_count} 个在线学友")
         except Exception as e:
-            print(f"[WebSocket] 通知学友在线状态失败: {e}")
+            logger.error(f"[WebSocket] 通知学友在线状态失败: {type(e).__name__}: {e}")
     
     async def send_to_user(self, openid: str, message: dict):
         """发送消息给指定用户的所有连接"""
         if openid in self.active_connections:
             disconnected = []
+            conn_count = len(self.active_connections[openid])
+            logger.debug(f"[WebSocket] 发送消息给 {openid[:8]}..., 连接数: {conn_count}, type: {message.get('type')}")
             for connection in self.active_connections[openid]:
                 try:
                     await connection.send_json(message)
                 except Exception as e:
-                    print(f"[WebSocket] 发送消息失败: {e}")
+                    logger.warning(f"[WebSocket] 发送消息失败: {type(e).__name__}: {e}")
                     disconnected.append(connection)
             
             # 清理断开的连接
             for conn in disconnected:
                 await self.disconnect(conn)
+        else:
+            logger.debug(f"[WebSocket] 用户 {openid[:8]}... 不在线，跳过发送")
     
     async def broadcast_to_users(self, openids: list, message: dict):
         """广播消息给多个用户"""
@@ -247,26 +268,47 @@ async def websocket_endpoint(
     - 已读更新: {"type": "read_update", "chatId": "xxx", "readAt": "xxx"}
     - 连接成功: {"type": "connected", "totalUnread": 10}
     """
+    logger.info(f"[WebSocket] 收到连接请求: openid={openid[:8] if openid else 'None'}...")
+    
     if not openid:
+        logger.warning("[WebSocket] 拒绝连接: 缺少 openid")
         await websocket.close(code=4001, reason="Missing openid")
         return
     
-    await manager.connect(websocket, openid)
+    try:
+        await manager.connect(websocket, openid)
+    except Exception as e:
+        logger.error(f"[WebSocket] 连接失败: {type(e).__name__}: {e}")
+        return
     
     try:
         # 发送连接成功消息和当前未读数
+        logger.debug(f"[WebSocket] 开始获取用户数据: openid={openid[:8]}...")
         db = get_db()
-        total_unread = await get_unread_count(db, openid)
         
-        # 获取学友的在线状态
-        friends_status = await get_friends_online_status(db, openid)
+        try:
+            total_unread = await get_unread_count(db, openid)
+            logger.debug(f"[WebSocket] 未读数: {total_unread}")
+        except Exception as e:
+            logger.error(f"[WebSocket] 获取未读数失败: {type(e).__name__}: {e}")
+            total_unread = 0
         
-        await websocket.send_json({
+        try:
+            # 获取学友的在线状态
+            friends_status = await get_friends_online_status(db, openid)
+            logger.debug(f"[WebSocket] 学友在线状态: {len(friends_status)} 个学友")
+        except Exception as e:
+            logger.error(f"[WebSocket] 获取学友在线状态失败: {type(e).__name__}: {e}")
+            friends_status = {}
+        
+        connected_msg = {
             "type": "connected",
             "totalUnread": total_unread,
             "friendsStatus": friends_status,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        logger.info(f"[WebSocket] 发送 connected 消息: openid={openid[:8]}..., unread={total_unread}")
+        await websocket.send_json(connected_msg)
         
         # 当前用户正在查看的聊天
         current_chat_id = None
@@ -280,6 +322,7 @@ async def websocket_endpoint(
                 )
                 
                 msg_type = data.get("type")
+                logger.debug(f"[WebSocket] 收到消息: openid={openid[:8]}..., type={msg_type}")
                 
                 if msg_type == "ping":
                     # 心跳响应
@@ -291,6 +334,7 @@ async def websocket_endpoint(
                 elif msg_type == "enter_chat":
                     # 进入聊天，记录当前查看的会话
                     current_chat_id = data.get("chatId")
+                    logger.debug(f"[WebSocket] 进入聊天: chatId={current_chat_id}")
                     if current_chat_id:
                         # 自动标记已读
                         await mark_chat_read(db, openid, current_chat_id)
@@ -303,11 +347,13 @@ async def websocket_endpoint(
                 
                 elif msg_type == "leave_chat":
                     # 离开聊天
+                    logger.debug(f"[WebSocket] 离开聊天: chatId={current_chat_id}")
                     current_chat_id = None
                 
                 elif msg_type == "mark_read":
                     # 手动标记已读
                     chat_id = data.get("chatId")
+                    logger.debug(f"[WebSocket] 标记已读: chatId={chat_id}")
                     if chat_id:
                         await mark_chat_read(db, openid, chat_id)
                         # 推送更新后的未读数
@@ -319,17 +365,20 @@ async def websocket_endpoint(
                 
             except asyncio.TimeoutError:
                 # 超时，发送心跳检测
+                logger.debug(f"[WebSocket] 接收超时，发送心跳: openid={openid[:8]}...")
                 try:
                     await websocket.send_json({"type": "ping"})
-                except:
+                except Exception as e:
+                    logger.warning(f"[WebSocket] 发送心跳失败: {type(e).__name__}: {e}")
                     break
                     
-    except WebSocketDisconnect:
-        print(f"[WebSocket] 用户 {openid[:8]}... 主动断开")
+    except WebSocketDisconnect as e:
+        logger.info(f"[WebSocket] 用户 {openid[:8]}... 主动断开, code={e.code}")
     except Exception as e:
-        print(f"[WebSocket] 错误: {e}")
+        logger.error(f"[WebSocket] 错误: {type(e).__name__}: {e}")
     finally:
         await manager.disconnect(websocket)
+        logger.info(f"[WebSocket] 连接清理完成: openid={openid[:8]}...")
 
 
 async def mark_chat_read(db, openid: str, chat_id: str):
