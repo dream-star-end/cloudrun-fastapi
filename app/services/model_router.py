@@ -98,9 +98,28 @@ class ModelRouter:
         request_id = generate_request_id()
         set_request_context(request_id=request_id, openid=openid)
         
+        # ========== 详细日志：接收到的消息 ==========
+        logger.info("=" * 60)
+        logger.info(f"[ModelRouter] 🚀 新请求开始")
+        logger.info(f"[ModelRouter] request_id: {request_id}")
+        logger.info(f"[ModelRouter] openid: {openid[:8]}***")
+        logger.info(f"[ModelRouter] stream: {stream}")
+        logger.info(f"[ModelRouter] history_count: {len(history)}")
+        logger.info(f"[ModelRouter] has_context: {context is not None}")
+        logger.info(f"[ModelRouter] has_user_memory: {user_memory is not None}")
+        
+        # 打印消息内容摘要
+        text_content = message.get("text", "")
+        logger.info(f"[ModelRouter] 📝 消息内容:")
+        logger.info(f"  - text: {text_content[:100]}{'...' if len(text_content) > 100 else ''}" if text_content else "  - text: (无)")
+        logger.info(f"  - image_url: {'有' if message.get('image_url') else '无'}")
+        logger.info(f"  - image_base64: {'有' if message.get('image_base64') else '无'}")
+        logger.info(f"  - voice_url: {'有' if message.get('voice_url') else '无'}")
+        logger.info(f"  - voice_text: {'有' if message.get('voice_text') else '无'}")
+        
         # 检测消息类型
         msg_type = cls.detect_message_type(message)
-        logger.info(f"[ModelRouter] 消息类型: {msg_type.value}, openid={openid[:8]}..., request_id={request_id}")
+        logger.info(f"[ModelRouter] 🔍 检测到消息类型: {msg_type.value}")
         
         # 根据消息类型获取模型配置
         if msg_type == MessageType.TEXT:
@@ -112,17 +131,29 @@ class ModelRouter:
             # 否则需要语音模型
             if message.get("voice_text"):
                 model_type = "text"
+                logger.info(f"[ModelRouter] 语音已转文本，使用文本模型")
             else:
                 model_type = "voice"
         else:
             model_type = "text"
         
+        logger.info(f"[ModelRouter] 📋 需要的模型类型: {model_type}")
+        
         # 获取用户配置的模型
         model_config = await ModelConfigService.get_model_for_type(openid, model_type)
-        logger.info(f"[ModelRouter] 选择模型: platform={model_config['platform']}, model={model_config['model']}, is_user_config={model_config.get('is_user_config', False)}")
+        
+        # ========== 详细日志：选择的模型 ==========
+        logger.info(f"[ModelRouter] ✅ 模型选择结果:")
+        logger.info(f"  - platform: {model_config['platform']}")
+        logger.info(f"  - model: {model_config['model']}")
+        logger.info(f"  - base_url: {model_config['base_url'][:50]}...")
+        logger.info(f"  - is_user_config: {model_config.get('is_user_config', False)}")
+        logger.info(f"  - api_key: {'已配置' if model_config.get('api_key') else '❌ 未配置'}")
+        logger.info("=" * 60)
         
         # 构建消息列表
         messages = cls._build_messages(message, history, context, user_memory, msg_type)
+        logger.info(f"[ModelRouter] 📨 构建消息列表完成，共 {len(messages)} 条消息")
         
         # 调用模型（带降级）
         fallback_config = cls._get_fallback_config()
@@ -179,6 +210,11 @@ class ModelRouter:
         
         # 检查主模型配置是否有效
         if not primary_config.get("api_key"):
+            logger.warning(f"[ModelRouter] ⚠️ 主模型 API Key 未配置")
+            logger.warning(f"  - platform: {primary_config.get('platform')}")
+            logger.warning(f"  - model: {primary_config.get('model')}")
+            logger.info(f"[ModelRouter] 🔄 切换到降级模型: {fallback_config['platform']}/{fallback_config['model']}")
+            
             log_config_error(
                 message="主模型 API Key 未配置，使用降级模型",
                 openid=openid,
@@ -205,6 +241,8 @@ class ModelRouter:
                 yield chunk
                 
         except Exception as e:
+            logger.error(f"[ModelRouter] ❌ 主模型调用失败: {type(e).__name__}: {e}")
+            
             log_model_error(
                 message=f"主模型调用失败: {type(e).__name__}: {e}",
                 platform=primary_config.get("platform", "unknown"),
@@ -216,10 +254,11 @@ class ModelRouter:
             # 如果主模型就是降级模型，直接抛出错误
             if primary_config.get("platform") == fallback_config.get("platform") and \
                primary_config.get("model") == fallback_config.get("model"):
+                logger.error(f"[ModelRouter] ❌ 降级模型也失败，无法继续")
                 raise
             
             # 尝试降级模型
-            logger.info(f"[ModelRouter] 尝试降级到: {fallback_config['platform']}/{fallback_config['model']}")
+            logger.info(f"[ModelRouter] 🔄 尝试降级到: {fallback_config['platform']}/{fallback_config['model']}")
             
             yield {
                 "type": "fallback_notice",
@@ -264,7 +303,13 @@ class ModelRouter:
         model = config["model"]
         platform = config.get("platform", "unknown")
         
-        logger.info(f"[ModelRouter] 调用模型: {model} @ {base_url[:30]}...")
+        # ========== 详细日志：API 调用 ==========
+        logger.info(f"[ModelRouter] 🌐 开始调用模型 API")
+        logger.info(f"  - platform: {platform}")
+        logger.info(f"  - model: {model}")
+        logger.info(f"  - base_url: {base_url}")
+        logger.info(f"  - stream: {stream}")
+        logger.info(f"  - messages_count: {len(messages)}")
         
         request_body = {
             "model": model,
@@ -278,6 +323,10 @@ class ModelRouter:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         }
+        
+        # 日志中脱敏显示 API Key
+        logger.info(f"[ModelRouter] 📤 发送请求到: {base_url}/chat/completions")
+        logger.info(f"  - Authorization: Bearer {api_key[:8]}***" if api_key else "  - Authorization: Bearer (empty)")
         
         if stream:
             async for event in cls._stream_request(
@@ -308,21 +357,29 @@ class ModelRouter:
         Requirements: 9.4
         """
         partial_content_length = 0
+        chunk_count = 0
         
         try:
             async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
+                logger.info(f"[ModelRouter] 🔗 建立流式连接...")
+                
                 async with client.stream(
                     "POST",
                     f"{base_url}/chat/completions",
                     headers=headers,
                     json=request_body,
                 ) as response:
+                    logger.info(f"[ModelRouter] 📥 收到响应: status={response.status_code}")
+                    
                     if response.status_code != 200:
                         error_text = ""
                         async for chunk in response.aiter_text():
                             error_text += chunk
                             if len(error_text) > 500:
                                 break
+                        
+                        logger.error(f"[ModelRouter] ❌ API 错误: status={response.status_code}")
+                        logger.error(f"[ModelRouter] 错误内容: {error_text[:200]}")
                         
                         log_model_error(
                             message=f"模型 API 错误",
@@ -334,10 +391,13 @@ class ModelRouter:
                         )
                         raise ValueError(f"模型 API 错误 ({response.status_code})")
                     
+                    logger.info(f"[ModelRouter] ✅ 开始接收流式数据...")
+                    
                     async for line in response.aiter_lines():
                         if line.startswith("data: "):
                             data_str = line[6:]
                             if data_str == "[DONE]":
+                                logger.info(f"[ModelRouter] 🏁 流式响应完成: 共 {chunk_count} 个数据块, {partial_content_length} 字符")
                                 yield {"type": "done"}
                                 break
                             
@@ -346,13 +406,20 @@ class ModelRouter:
                                 if data.get("choices") and data["choices"][0].get("delta"):
                                     content = data["choices"][0]["delta"].get("content", "")
                                     if content:
+                                        chunk_count += 1
                                         partial_content_length += len(content)
+                                        
+                                        # 每 10 个块打印一次进度
+                                        if chunk_count % 10 == 0:
+                                            logger.debug(f"[ModelRouter] 📊 进度: {chunk_count} 块, {partial_content_length} 字符")
+                                        
                                         yield {"type": "text", "content": content}
                             except json.JSONDecodeError:
                                 continue
                                 
         except httpx.ReadTimeout as e:
             # 流式读取超时
+            logger.error(f"[ModelRouter] ⏰ 流式响应超时: 已接收 {partial_content_length} 字符")
             log_stream_error(
                 message=f"流式响应超时: {e}",
                 openid=openid,
@@ -372,6 +439,7 @@ class ModelRouter:
                 
         except httpx.ReadError as e:
             # 流式读取错误（网络中断等）
+            logger.error(f"[ModelRouter] 🔌 流式响应中断: 已接收 {partial_content_length} 字符")
             log_stream_error(
                 message=f"流式响应中断: {e}",
                 openid=openid,
@@ -391,6 +459,7 @@ class ModelRouter:
                 
         except Exception as e:
             # 其他异常
+            logger.error(f"[ModelRouter] ❌ 流式响应异常: {type(e).__name__}: {e}")
             if partial_content_length > 0:
                 log_stream_error(
                     message=f"流式响应异常: {type(e).__name__}: {e}",
