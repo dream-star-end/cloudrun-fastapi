@@ -34,12 +34,12 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:80/health || exit 1
 
 # 启动命令
-# 使用 gunicorn + uvicorn worker 获得更好的性能
-CMD ["gunicorn", "main:app", \
-     "--bind", "0.0.0.0:80", \
+# 使用 uvicorn 直接启动，更好地支持 WebSocket 长连接
+# gunicorn 的 timeout 设置可能会中断 WebSocket 连接
+CMD ["uvicorn", "main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "80", \
      "--workers", "2", \
-     "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--timeout", "120", \
-     "--graceful-timeout", "30", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-"]
+     "--timeout-keep-alive", "120", \
+     "--ws-ping-interval", "20", \
+     "--ws-ping-timeout", "20"]
