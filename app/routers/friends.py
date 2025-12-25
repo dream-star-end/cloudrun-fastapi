@@ -1532,3 +1532,83 @@ async def get_friend_profile(request: Request, target_openid: str):
         }
     }
 
+
+# ==================== 在线状态 API ====================
+
+@router.get("/online-status")
+async def get_friends_online_status(request: Request):
+    """
+    获取所有学友的在线状态
+    返回每个学友的在线状态和最后活跃时间
+    """
+    openid = _get_openid_from_request(request)
+    db = get_db()
+    
+    # 导入 WebSocket 管理器
+    from .websocket import manager
+    
+    # 获取用户的所有学友
+    friendships = await db.query(
+        "friendships",
+        {
+            "$or": [
+                {"openid": openid, "status": "accepted"},
+                {"friendOpenid": openid, "status": "accepted"},
+            ]
+        },
+        limit=500,
+    )
+    
+    # 收集学友的 openid 并获取在线状态
+    friends_status = {}
+    for f in friendships:
+        friend_openid = f.get("friendOpenid") if f.get("openid") == openid else f.get("openid")
+        if friend_openid:
+            is_online = manager.is_user_online(friend_openid)
+            last_active = manager.get_user_last_active(friend_openid)
+            friends_status[friend_openid] = {
+                "isOnline": is_online,
+                "lastActiveAt": last_active.isoformat() if last_active else None,
+            }
+    
+    return {
+        "success": True,
+        "data": {
+            "friendsStatus": friends_status,
+        }
+    }
+
+
+@router.post("/online-status/batch")
+async def get_batch_online_status(request: Request):
+    """
+    批量获取指定用户的在线状态
+    """
+    openid = _get_openid_from_request(request)
+    
+    try:
+        body = await request.json()
+    except:
+        body = {}
+    
+    openids = body.get("openids", [])
+    if not openids or not isinstance(openids, list):
+        return {
+            "success": True,
+            "data": {
+                "status": {},
+            }
+        }
+    
+    # 导入 WebSocket 管理器
+    from .websocket import manager
+    
+    # 批量获取在线状态
+    status = manager.get_users_online_status(openids)
+    
+    return {
+        "success": True,
+        "data": {
+            "status": status,
+        }
+    }

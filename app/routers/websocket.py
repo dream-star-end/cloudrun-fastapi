@@ -29,21 +29,34 @@ class ConnectionManager:
         self.active_connections: Dict[str, Set[WebSocket]] = {}
         # WebSocket -> openid 反向映射
         self.connection_user: Dict[WebSocket, str] = {}
+        # 用户最后活跃时间 openid -> datetime
+        self.last_active_time: Dict[str, datetime] = {}
         # 锁，用于线程安全操作
         self._lock = asyncio.Lock()
     
     async def connect(self, websocket: WebSocket, openid: str):
         """接受新连接"""
         await websocket.accept()
+        was_offline = openid not in self.active_connections or len(self.active_connections.get(openid, set())) == 0
+        
         async with self._lock:
             if openid not in self.active_connections:
                 self.active_connections[openid] = set()
             self.active_connections[openid].add(websocket)
             self.connection_user[websocket] = openid
+            self.last_active_time[openid] = datetime.now(timezone.utc)
+        
         print(f"[WebSocket] 用户 {openid[:8]}... 已连接，当前连接数: {len(self.active_connections[openid])}")
+        
+        # 如果用户从离线变为在线，通知其学友
+        if was_offline:
+            asyncio.create_task(self._notify_friends_online_status(openid, True))
     
     async def disconnect(self, websocket: WebSocket):
         """断开连接"""
+        openid = None
+        is_now_offline = False
+        
         async with self._lock:
             openid = self.connection_user.get(websocket)
             if openid:
@@ -51,8 +64,53 @@ class ConnectionManager:
                     self.active_connections[openid].discard(websocket)
                     if not self.active_connections[openid]:
                         del self.active_connections[openid]
+                        is_now_offline = True
+                        # 更新最后活跃时间
+                        self.last_active_time[openid] = datetime.now(timezone.utc)
                 del self.connection_user[websocket]
                 print(f"[WebSocket] 用户 {openid[:8]}... 已断开")
+        
+        # 如果用户完全离线，通知其学友
+        if openid and is_now_offline:
+            asyncio.create_task(self._notify_friends_online_status(openid, False))
+    
+    async def _notify_friends_online_status(self, openid: str, is_online: bool):
+        """通知用户的学友其在线状态变化"""
+        try:
+            db = get_db()
+            # 获取用户的所有学友
+            friendships = await db.query(
+                "friendships",
+                {
+                    "$or": [
+                        {"openid": openid, "status": "accepted"},
+                        {"friendOpenid": openid, "status": "accepted"},
+                    ]
+                },
+                limit=500,
+            )
+            
+            # 获取用户信息
+            user_info = await get_user_info(db, openid)
+            last_active = self.last_active_time.get(openid)
+            last_active_str = last_active.isoformat() if last_active else None
+            
+            # 通知每个在线的学友
+            for f in friendships:
+                friend_openid = f.get("friendOpenid") if f.get("openid") == openid else f.get("openid")
+                if friend_openid and self.is_user_online(friend_openid):
+                    await self.send_to_user(friend_openid, {
+                        "type": "friend_status_change",
+                        "data": {
+                            "friendOpenid": openid,
+                            "friendInfo": user_info,
+                            "isOnline": is_online,
+                            "lastActiveAt": last_active_str,
+                        },
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+        except Exception as e:
+            print(f"[WebSocket] 通知学友在线状态失败: {e}")
     
     async def send_to_user(self, openid: str, message: dict):
         """发送消息给指定用户的所有连接"""
@@ -81,6 +139,27 @@ class ConnectionManager:
     def get_online_users(self) -> list:
         """获取所有在线用户"""
         return list(self.active_connections.keys())
+    
+    def get_user_last_active(self, openid: str) -> Optional[datetime]:
+        """获取用户最后活跃时间"""
+        return self.last_active_time.get(openid)
+    
+    def get_users_online_status(self, openids: list) -> dict:
+        """批量获取用户在线状态"""
+        result = {}
+        for openid in openids:
+            is_online = self.is_user_online(openid)
+            last_active = self.last_active_time.get(openid)
+            result[openid] = {
+                "isOnline": is_online,
+                "lastActiveAt": last_active.isoformat() if last_active else None,
+            }
+        return result
+    
+    async def update_user_activity(self, openid: str):
+        """更新用户活跃时间"""
+        async with self._lock:
+            self.last_active_time[openid] = datetime.now(timezone.utc)
 
 
 # 全局连接管理器
@@ -119,6 +198,31 @@ async def get_unread_count(db, openid: str) -> int:
     return total
 
 
+async def get_friends_online_status(db, openid: str) -> dict:
+    """获取用户所有学友的在线状态"""
+    # 获取用户的所有学友
+    friendships = await db.query(
+        "friendships",
+        {
+            "$or": [
+                {"openid": openid, "status": "accepted"},
+                {"friendOpenid": openid, "status": "accepted"},
+            ]
+        },
+        limit=500,
+    )
+    
+    # 收集学友的 openid
+    friend_openids = []
+    for f in friendships:
+        friend_openid = f.get("friendOpenid") if f.get("openid") == openid else f.get("openid")
+        if friend_openid:
+            friend_openids.append(friend_openid)
+    
+    # 批量获取在线状态
+    return manager.get_users_online_status(friend_openids)
+
+
 @router.websocket("/chat")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -154,9 +258,13 @@ async def websocket_endpoint(
         db = get_db()
         total_unread = await get_unread_count(db, openid)
         
+        # 获取学友的在线状态
+        friends_status = await get_friends_online_status(db, openid)
+        
         await websocket.send_json({
             "type": "connected",
             "totalUnread": total_unread,
+            "friendsStatus": friends_status,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         
