@@ -2,7 +2,7 @@
 智能模型路由器模块
 根据消息类型和用户配置选择合适的 AI 模型
 
-Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6
+Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 9.5
 """
 
 import httpx
@@ -14,6 +14,13 @@ from enum import Enum
 from ..config import settings, get_http_client_kwargs
 from .model_config_service import ModelConfigService
 from .ai_service import AIService
+from ..utils.error_logger import (
+    log_model_error,
+    log_config_error,
+    log_stream_error,
+    set_request_context,
+    generate_request_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +94,13 @@ class ModelRouter:
         """
         history = history or []
         
+        # 设置请求上下文用于错误日志
+        request_id = generate_request_id()
+        set_request_context(request_id=request_id, openid=openid)
+        
         # 检测消息类型
         msg_type = cls.detect_message_type(message)
-        logger.info(f"[ModelRouter] 消息类型: {msg_type.value}, openid={openid[:8]}...")
+        logger.info(f"[ModelRouter] 消息类型: {msg_type.value}, openid={openid[:8]}..., request_id={request_id}")
         
         # 根据消息类型获取模型配置
         if msg_type == MessageType.TEXT:
@@ -123,10 +134,17 @@ class ModelRouter:
                 messages=messages,
                 stream=stream,
                 msg_type=msg_type,
+                openid=openid,
             ):
                 yield event
         except Exception as e:
-            logger.error(f"[ModelRouter] 模型调用失败: {type(e).__name__}: {e}")
+            log_model_error(
+                message=f"模型调用最终失败: {type(e).__name__}: {e}",
+                platform=model_config.get("platform", "unknown"),
+                model=model_config.get("model", "unknown"),
+                openid=openid,
+                exception=e,
+            )
             yield {
                 "type": "error",
                 "error": str(e),
@@ -140,6 +158,7 @@ class ModelRouter:
         messages: List[Dict],
         stream: bool,
         msg_type: MessageType,
+        openid: str = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         带降级的模型调用
@@ -150,6 +169,7 @@ class ModelRouter:
             messages: 消息列表
             stream: 是否流式
             msg_type: 消息类型
+            openid: 用户标识（用于错误日志）
             
         Yields:
             流式响应事件
@@ -159,7 +179,11 @@ class ModelRouter:
         
         # 检查主模型配置是否有效
         if not primary_config.get("api_key"):
-            logger.warning(f"[ModelRouter] 主模型 API Key 无效，使用降级模型")
+            log_config_error(
+                message="主模型 API Key 未配置，使用降级模型",
+                openid=openid,
+                config_type=msg_type.value,
+            )
             used_fallback = True
             fallback_reason = "API Key 未配置"
             primary_config = fallback_config
@@ -171,6 +195,7 @@ class ModelRouter:
                 messages=messages,
                 stream=stream,
                 msg_type=msg_type,
+                openid=openid,
             ):
                 if used_fallback and chunk.get("type") == "text":
                     # 第一个文本块时标记使用了降级
@@ -180,7 +205,13 @@ class ModelRouter:
                 yield chunk
                 
         except Exception as e:
-            logger.warning(f"[ModelRouter] 主模型调用失败: {type(e).__name__}: {e}")
+            log_model_error(
+                message=f"主模型调用失败: {type(e).__name__}: {e}",
+                platform=primary_config.get("platform", "unknown"),
+                model=primary_config.get("model", "unknown"),
+                openid=openid,
+                exception=e,
+            )
             
             # 如果主模型就是降级模型，直接抛出错误
             if primary_config.get("platform") == fallback_config.get("platform") and \
@@ -202,6 +233,7 @@ class ModelRouter:
                 messages=messages,
                 stream=stream,
                 msg_type=msg_type,
+                openid=openid,
             ):
                 yield chunk
     
@@ -212,6 +244,7 @@ class ModelRouter:
         messages: List[Dict],
         stream: bool,
         msg_type: MessageType,
+        openid: str = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         调用模型 API
@@ -221,6 +254,7 @@ class ModelRouter:
             messages: 消息列表
             stream: 是否流式
             msg_type: 消息类型
+            openid: 用户标识（用于错误日志）
             
         Yields:
             流式响应事件
@@ -228,6 +262,7 @@ class ModelRouter:
         base_url = config["base_url"]
         api_key = config["api_key"]
         model = config["model"]
+        platform = config.get("platform", "unknown")
         
         logger.info(f"[ModelRouter] 调用模型: {model} @ {base_url[:30]}...")
         
@@ -245,10 +280,16 @@ class ModelRouter:
         }
         
         if stream:
-            async for event in cls._stream_request(base_url, headers, request_body):
+            async for event in cls._stream_request(
+                base_url, headers, request_body, 
+                platform=platform, model=model, openid=openid
+            ):
                 yield event
         else:
-            result = await cls._non_stream_request(base_url, headers, request_body)
+            result = await cls._non_stream_request(
+                base_url, headers, request_body,
+                platform=platform, model=model, openid=openid
+            )
             yield result
     
     @classmethod
@@ -257,41 +298,114 @@ class ModelRouter:
         base_url: str,
         headers: Dict[str, str],
         request_body: Dict[str, Any],
+        platform: str = "unknown",
+        model: str = "unknown",
+        openid: str = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        流式请求
+        流式请求（带中断处理和部分内容保留）
+        
+        Requirements: 9.4
         """
-        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
-            async with client.stream(
-                "POST",
-                f"{base_url}/chat/completions",
-                headers=headers,
-                json=request_body,
-            ) as response:
-                if response.status_code != 200:
-                    error_text = ""
-                    async for chunk in response.aiter_text():
-                        error_text += chunk
-                        if len(error_text) > 500:
-                            break
-                    logger.error(f"[ModelRouter] API 错误: status={response.status_code}, body={error_text[:500]}")
-                    raise ValueError(f"模型 API 错误 ({response.status_code})")
-                
-                async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        if data_str == "[DONE]":
-                            yield {"type": "done"}
-                            break
+        partial_content_length = 0
+        
+        try:
+            async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
+                async with client.stream(
+                    "POST",
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json=request_body,
+                ) as response:
+                    if response.status_code != 200:
+                        error_text = ""
+                        async for chunk in response.aiter_text():
+                            error_text += chunk
+                            if len(error_text) > 500:
+                                break
                         
-                        try:
-                            data = json.loads(data_str)
-                            if data.get("choices") and data["choices"][0].get("delta"):
-                                content = data["choices"][0]["delta"].get("content", "")
-                                if content:
-                                    yield {"type": "text", "content": content}
-                        except json.JSONDecodeError:
-                            continue
+                        log_model_error(
+                            message=f"模型 API 错误",
+                            platform=platform,
+                            model=model,
+                            openid=openid,
+                            status_code=response.status_code,
+                            response_body=error_text,
+                        )
+                        raise ValueError(f"模型 API 错误 ({response.status_code})")
+                    
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]":
+                                yield {"type": "done"}
+                                break
+                            
+                            try:
+                                data = json.loads(data_str)
+                                if data.get("choices") and data["choices"][0].get("delta"):
+                                    content = data["choices"][0]["delta"].get("content", "")
+                                    if content:
+                                        partial_content_length += len(content)
+                                        yield {"type": "text", "content": content}
+                            except json.JSONDecodeError:
+                                continue
+                                
+        except httpx.ReadTimeout as e:
+            # 流式读取超时
+            log_stream_error(
+                message=f"流式响应超时: {e}",
+                openid=openid,
+                partial_content_length=partial_content_length,
+                exception=e,
+            )
+            # 如果已有部分内容，发送中断通知而不是抛出错误
+            if partial_content_length > 0:
+                yield {
+                    "type": "stream_interrupted",
+                    "message": "响应超时，已显示部分内容",
+                    "partial_content_length": partial_content_length,
+                }
+                yield {"type": "done"}
+            else:
+                raise
+                
+        except httpx.ReadError as e:
+            # 流式读取错误（网络中断等）
+            log_stream_error(
+                message=f"流式响应中断: {e}",
+                openid=openid,
+                partial_content_length=partial_content_length,
+                exception=e,
+            )
+            # 如果已有部分内容，发送中断通知
+            if partial_content_length > 0:
+                yield {
+                    "type": "stream_interrupted",
+                    "message": "连接中断，已显示部分内容",
+                    "partial_content_length": partial_content_length,
+                }
+                yield {"type": "done"}
+            else:
+                raise
+                
+        except Exception as e:
+            # 其他异常
+            if partial_content_length > 0:
+                log_stream_error(
+                    message=f"流式响应异常: {type(e).__name__}: {e}",
+                    openid=openid,
+                    partial_content_length=partial_content_length,
+                    exception=e,
+                )
+                yield {
+                    "type": "stream_interrupted",
+                    "message": "响应异常，已显示部分内容",
+                    "partial_content_length": partial_content_length,
+                }
+                yield {"type": "done"}
+            else:
+                raise
     
     @classmethod
     async def _non_stream_request(
@@ -299,6 +413,9 @@ class ModelRouter:
         base_url: str,
         headers: Dict[str, str],
         request_body: Dict[str, Any],
+        platform: str = "unknown",
+        model: str = "unknown",
+        openid: str = None,
     ) -> Dict[str, Any]:
         """
         非流式请求
@@ -312,7 +429,14 @@ class ModelRouter:
             
             if response.status_code != 200:
                 error_text = response.text[:500] if response.text else "无响应内容"
-                logger.error(f"[ModelRouter] API 错误: status={response.status_code}, body={error_text}")
+                log_model_error(
+                    message=f"模型 API 错误",
+                    platform=platform,
+                    model=model,
+                    openid=openid,
+                    status_code=response.status_code,
+                    response_body=error_text,
+                )
                 raise ValueError(f"模型 API 错误 ({response.status_code})")
             
             data = response.json()

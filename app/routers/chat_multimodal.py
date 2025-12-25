@@ -213,6 +213,10 @@ async def _stream_response(
                 elif event_type == "fallback_notice":
                     yield f"data: {json.dumps(event)}\n\n"
                 
+                elif event_type == "stream_interrupted":
+                    # 流式中断，保留部分内容
+                    yield f"data: {json.dumps({'type': 'stream_interrupted', 'message': event.get('message', '响应中断'), 'partial_content_length': event.get('partial_content_length', 0)})}\n\n"
+                
                 elif event_type == "error":
                     yield f"data: {json.dumps({'type': 'error', 'error': event.get('error', '未知错误')})}\n\n"
                 
