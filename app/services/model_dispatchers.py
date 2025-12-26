@@ -60,12 +60,12 @@ class ModelDispatcher(ABC):
         model_lower = model.lower()
         
         # Gemini 模型且有语音输入，使用 Gemini 音频分发器
-        if model_lower.startswith("gemini") and has_voice:
+        if "gemini" in model_lower and has_voice:
             logger.info(f"[Dispatcher] 使用 GeminiAudioDispatcher: model={model}")
             return GeminiAudioDispatcher()
         
         # Gemini 模型（无语音），使用 Gemini 通用分发器
-        if model_lower.startswith("gemini"):
+        if "gemini" in model_lower:
             logger.info(f"[Dispatcher] 使用 GeminiDispatcher: model={model}")
             return GeminiDispatcher()
         
@@ -668,7 +668,7 @@ class OpenAISTTDispatcher(ModelDispatcher):
                 voice_url=voice_url,
                 openid=openid,
             )
-            logger.info(f"[OpenAISTTDispatcher] 语音转文本成功: {transcribed_text[:100]}...")
+            logger.info(f"[OpenAISTTDispatcher] 语音转文本成功: {transcribed_text[:100] if transcribed_text else '(空)'}...")
             
             # 发送转录通知
             yield {
@@ -725,23 +725,52 @@ class OpenAISTTDispatcher(ModelDispatcher):
             转录的文本
         """
         # 先下载音频文件
-        logger.info(f"[OpenAISTTDispatcher] 下载音频文件: {voice_url[:80]}...")
+        logger.info(f"[OpenAISTTDispatcher] 下载音频文件: {voice_url}")
         
         async with httpx.AsyncClient(**get_http_client_kwargs(60.0)) as client:
             # 下载音频
-            audio_response = await client.get(voice_url)
+            try:
+                audio_response = await client.get(voice_url, follow_redirects=True)
+            except Exception as e:
+                logger.error(f"[OpenAISTTDispatcher] 下载音频异常: {e}")
+                raise ValueError(f"下载音频失败: {str(e)}")
+            
             if audio_response.status_code != 200:
+                logger.error(f"[OpenAISTTDispatcher] 下载音频失败: HTTP {audio_response.status_code}")
                 raise ValueError(f"下载音频失败: HTTP {audio_response.status_code}")
             
             audio_data = audio_response.content
-            logger.info(f"[OpenAISTTDispatcher] 音频下载完成: {len(audio_data)} bytes")
+            content_type = audio_response.headers.get("content-type", "")
+            
+            logger.info(f"[OpenAISTTDispatcher] 音频下载完成:")
+            logger.info(f"  - 大小: {len(audio_data)} bytes")
+            logger.info(f"  - Content-Type: {content_type}")
+            
+            # 检查音频数据是否有效
+            if len(audio_data) < 1000:
+                logger.error(f"[OpenAISTTDispatcher] 音频文件太小，可能无效: {len(audio_data)} bytes")
+                raise ValueError(f"音频文件太小或无效: {len(audio_data)} bytes")
+            
+            # 检查是否是有效的音频文件（检查文件头）
+            # MP3 文件头: ID3 或 0xFF 0xFB
+            # WAV 文件头: RIFF
+            is_valid_audio = (
+                audio_data[:3] == b'ID3' or  # MP3 with ID3 tag
+                audio_data[:2] == b'\xff\xfb' or  # MP3 without ID3
+                audio_data[:2] == b'\xff\xfa' or  # MP3 variant
+                audio_data[:4] == b'RIFF' or  # WAV
+                audio_data[:4] == b'fLaC' or  # FLAC
+                audio_data[:4] == b'OggS'  # OGG
+            )
+            
+            if not is_valid_audio:
+                logger.warning(f"[OpenAISTTDispatcher] 音频文件头不匹配常见格式: {audio_data[:10].hex()}")
             
             # 推断文件格式
-            content_type = audio_response.headers.get("content-type", "")
             filename = self._get_filename_from_url(voice_url, content_type)
+            mime_type = self._get_mime_type(filename)
             
             # 调用 STT API
-            # 使用 multipart/form-data 格式
             transcription_url = f"{base_url}/audio/transcriptions"
             
             headers = {
@@ -749,26 +778,40 @@ class OpenAISTTDispatcher(ModelDispatcher):
             }
             
             # 构建 multipart 表单
+            # 使用正确的 whisper 模型名称
+            stt_model_name = "whisper-1"  # OpenAI STT 只支持 whisper-1
+            
             files = {
-                "file": (filename, audio_data, self._get_mime_type(filename)),
+                "file": (filename, audio_data, mime_type),
             }
             data = {
-                "model": model if model.startswith("whisper") else "whisper-1",  # STT 只支持 whisper 模型
+                "model": stt_model_name,
             }
             
-            logger.info(f"[OpenAISTTDispatcher] 调用 STT API: {transcription_url}")
-            logger.info(f"[OpenAISTTDispatcher] 文件名: {filename}, 模型: {data['model']}")
+            logger.info(f"[OpenAISTTDispatcher] 调用 STT API:")
+            logger.info(f"  - URL: {transcription_url}")
+            logger.info(f"  - 文件名: {filename}")
+            logger.info(f"  - MIME: {mime_type}")
+            logger.info(f"  - 模型: {stt_model_name}")
             
-            response = await client.post(
-                transcription_url,
-                headers=headers,
-                files=files,
-                data=data,
-            )
+            try:
+                response = await client.post(
+                    transcription_url,
+                    headers=headers,
+                    files=files,
+                    data=data,
+                    timeout=60.0,
+                )
+            except Exception as e:
+                logger.error(f"[OpenAISTTDispatcher] STT API 请求异常: {e}")
+                raise ValueError(f"STT API 请求失败: {str(e)}")
+            
+            logger.info(f"[OpenAISTTDispatcher] STT API 响应: status={response.status_code}")
             
             if response.status_code != 200:
                 error_text = response.text[:500] if response.text else "无响应内容"
-                logger.error(f"[OpenAISTTDispatcher] STT API 错误: {response.status_code}, {error_text}")
+                logger.error(f"[OpenAISTTDispatcher] STT API 错误: {response.status_code}")
+                logger.error(f"[OpenAISTTDispatcher] 错误详情: {error_text}")
                 log_model_error(
                     message=f"STT API 错误",
                     platform="openai",
@@ -780,7 +823,14 @@ class OpenAISTTDispatcher(ModelDispatcher):
                 raise ValueError(f"STT API 错误 ({response.status_code}): {error_text[:100]}")
             
             result = response.json()
-            return result.get("text", "")
+            text = result.get("text", "")
+            
+            if not text:
+                logger.warning(f"[OpenAISTTDispatcher] STT 返回空文本，响应: {result}")
+            else:
+                logger.info(f"[OpenAISTTDispatcher] 转录成功: {text[:50]}...")
+            
+            return text
     
     def _get_filename_from_url(self, url: str, content_type: str = "") -> str:
         """从 URL 或 Content-Type 推断文件名"""
