@@ -67,13 +67,23 @@ async def recognize_image(
     prompt = custom_prompt if custom_prompt else prompts.get(recognize_type, prompts["auto"])
     
     try:
-        # 使用视觉模型
-        llm = ChatOpenAI(
-            model=settings.DEEPSEEK_VISION_MODEL,
-            api_key=settings.DEEPSEEK_API_KEY,
-            base_url=settings.DEEPSEEK_API_BASE,
-            temperature=0.3,
-        )
+        # 使用视觉模型（GPT-4o 支持图片识别，DeepSeek 不支持）
+        # 优先使用 VISION 配置，如果没有配置则降级到 DeepSeek（会失败）
+        if settings.VISION_API_KEY:
+            llm = ChatOpenAI(
+                model=settings.VISION_MODEL,
+                api_key=settings.VISION_API_KEY,
+                base_url=settings.VISION_BASE_URL,
+                temperature=0.3,
+            )
+        else:
+            # 降级到 DeepSeek（注意：DeepSeek 不支持图片，会失败）
+            llm = ChatOpenAI(
+                model=settings.DEEPSEEK_VISION_MODEL,
+                api_key=settings.DEEPSEEK_API_KEY,
+                base_url=settings.DEEPSEEK_API_BASE,
+                temperature=0.3,
+            )
         
         messages = [
             {

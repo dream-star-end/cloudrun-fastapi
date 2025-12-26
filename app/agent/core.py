@@ -8,6 +8,7 @@ AI Agent 核心模块
 - 自我反思：评估执行结果并优化策略
 - 流式输出：支持实时响应
 - 多模态支持：支持图片、语音输入
+- 智能模型路由：根据用户配置和消息类型动态选择模型
 """
 
 import json
@@ -21,6 +22,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from .tools import get_all_tools
 from .memory import AgentMemory
 from ..config import settings, IS_CLOUDRUN, DISABLE_SSL_VERIFY
+from ..services.model_config_service import ModelConfigService
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +174,7 @@ class LearningAgent:
     - 使用 create_react_agent 创建 ReAct 风格的智能体
     - 支持工具调用和多轮对话
     - 内置记忆管理和用户画像
+    - 智能模型路由：根据用户配置和消息类型动态选择模型
     """
     
     def __init__(
@@ -184,22 +187,10 @@ class LearningAgent:
         self.mode = mode
         self.memory = memory or AgentMemory(user_id)
         
-        # 初始化 LLM
-        # 云托管环境中可能存在 SSL 证书问题，配置 HTTP 客户端
-        import httpx
-        http_client = None
-        if IS_CLOUDRUN or DISABLE_SSL_VERIFY:
-            # 云托管环境或强制禁用 SSL 验证
-            http_client = httpx.Client(verify=False, http2=False, timeout=120.0)
-        
-        self.llm = ChatOpenAI(
-            model=settings.DEEPSEEK_MODEL,
-            api_key=settings.DEEPSEEK_API_KEY,
-            base_url=settings.DEEPSEEK_API_BASE,
-            temperature=0.7,
-            streaming=True,
-            http_client=http_client,
-        )
+        # LLM 实例缓存（按模型类型）
+        self._llm_cache: Dict[str, ChatOpenAI] = {}
+        self._current_llm: Optional[ChatOpenAI] = None
+        self._current_model_info: Optional[Dict[str, Any]] = None
         
         # 获取工具
         self.tools = get_all_tools(user_id=user_id, memory=self.memory)
@@ -207,10 +198,133 @@ class LearningAgent:
         # LangGraph 检查点（用于对话状态持久化）
         self.checkpointer = MemorySaver()
         
-        # 创建 Agent
-        self._create_agent()
+        # Agent 实例（延迟创建，等待模型配置加载）
+        self.agent = None
     
-    def _create_agent(self):
+    def _create_llm(
+        self,
+        model_config: Dict[str, Any],
+    ) -> ChatOpenAI:
+        """
+        根据模型配置创建 LLM 实例
+        
+        Args:
+            model_config: 模型配置，包含 platform, model, base_url, api_key
+            
+        Returns:
+            ChatOpenAI 实例
+        """
+        import httpx
+        
+        # 云托管环境中可能存在 SSL 证书问题，配置 HTTP 客户端
+        http_client = None
+        if IS_CLOUDRUN or DISABLE_SSL_VERIFY:
+            http_client = httpx.Client(verify=False, http2=False, timeout=120.0)
+        
+        platform = model_config.get("platform", "deepseek")
+        model = model_config.get("model", "deepseek-chat")
+        base_url = model_config.get("base_url", settings.DEEPSEEK_API_BASE)
+        api_key = model_config.get("api_key", settings.DEEPSEEK_API_KEY)
+        
+        logger.info(f"[LearningAgent] 创建 LLM: platform={platform}, model={model}")
+        
+        return ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=0.7,
+            streaming=True,
+            http_client=http_client,
+        )
+    
+    async def _get_llm_for_message(
+        self,
+        multimodal: Optional[Dict[str, Any]] = None,
+    ) -> ChatOpenAI:
+        """
+        根据消息类型获取合适的 LLM
+        
+        智能路由逻辑：
+        - 纯文本消息 → 用户配置的文本模型
+        - 图片消息 → 用户配置的多模态/视觉模型
+        - 语音消息 → 用户配置的语音模型（或降级到文本模型）
+        
+        Args:
+            multimodal: 多模态消息字典
+            
+        Returns:
+            ChatOpenAI 实例
+        """
+        # 检测消息类型
+        model_type = "text"  # 默认文本
+        
+        if multimodal:
+            has_image = bool(multimodal.get("image_url") or multimodal.get("image_base64"))
+            has_voice = bool(multimodal.get("voice_url"))
+            
+            if has_image:
+                model_type = "multimodal"
+            elif has_voice:
+                model_type = "voice"
+        
+        # 检查缓存
+        cache_key = f"{self.user_id}:{model_type}"
+        if cache_key in self._llm_cache:
+            logger.debug(f"[LearningAgent] 使用缓存的 LLM: type={model_type}")
+            return self._llm_cache[cache_key]
+        
+        # 从 ModelConfigService 获取用户配置的模型
+        try:
+            model_config = await ModelConfigService.get_model_for_type(
+                openid=self.user_id,
+                model_type=model_type,
+            )
+            
+            is_user_config = model_config.get("is_user_config", False)
+            platform = model_config.get("platform", "unknown")
+            model = model_config.get("model", "unknown")
+            
+            if is_user_config:
+                logger.info(f"[LearningAgent] 使用用户配置的模型: type={model_type}, platform={platform}, model={model}")
+            else:
+                logger.info(f"[LearningAgent] 使用系统默认模型: type={model_type}, platform={platform}, model={model}")
+            
+            # 保存当前模型信息（用于日志和调试）
+            self._current_model_info = {
+                "type": model_type,
+                "platform": platform,
+                "model": model,
+                "is_user_config": is_user_config,
+            }
+            
+        except Exception as e:
+            logger.error(f"[LearningAgent] 获取模型配置失败，使用系统默认: {e}")
+            # 降级到系统默认配置
+            model_config = {
+                "platform": "deepseek",
+                "model": settings.DEEPSEEK_MODEL,
+                "base_url": settings.DEEPSEEK_API_BASE,
+                "api_key": settings.DEEPSEEK_API_KEY,
+                "is_user_config": False,
+            }
+            self._current_model_info = {
+                "type": model_type,
+                "platform": "deepseek",
+                "model": settings.DEEPSEEK_MODEL,
+                "is_user_config": False,
+                "fallback_reason": str(e),
+            }
+        
+        # 创建 LLM 实例
+        llm = self._create_llm(model_config)
+        
+        # 缓存 LLM 实例
+        self._llm_cache[cache_key] = llm
+        self._current_llm = llm
+        
+        return llm
+    
+    def _create_agent(self, llm: ChatOpenAI):
         """
         创建 LangGraph ReAct Agent
         
@@ -220,12 +334,15 @@ class LearningAgent:
         注意：LangGraph 0.2.x+ 中 state_modifier 参数已被移除
         系统提示现在通过 SystemMessage 在 chat() 和 chat_stream() 中动态添加
         这样可以支持动态的用户画像和对话摘要注入
+        
+        Args:
+            llm: ChatOpenAI 实例（根据消息类型动态选择）
         """
         # 使用 LangGraph 创建 ReAct Agent
         # create_react_agent 返回一个 CompiledGraph
         # 系统提示通过 _build_system_message() 动态构建并作为 SystemMessage 添加
         self.agent = create_react_agent(
-            model=self.llm,
+            model=llm,
             tools=self.tools,
             checkpointer=self.checkpointer,  # 启用对话状态持久化
         )
@@ -233,64 +350,52 @@ class LearningAgent:
     def _build_multimodal_content(
         self,
         multimodal: Dict[str, Any],
-    ) -> Union[str, List[Dict[str, Any]]]:
+    ) -> str:
         """
-        构建 LangChain 多模态消息内容
+        构建多模态消息内容（转换为纯文本）
         
-        LangChain 多模态格式：
-        [
-            {"type": "text", "text": "..."},
-            {"type": "image_url", "image_url": {"url": "..."}},
-        ]
+        由于 DeepSeek 不支持 image_url 类型的多模态输入，
+        我们将图片信息转换为文本提示，让 Agent 调用 recognize_image 工具处理。
         
         Args:
             multimodal: 多模态消息字典，包含 text, image_url, image_base64, voice_url, voice_text
             
         Returns:
-            如果只有文本，返回字符串；否则返回 LangChain 多模态内容列表
+            纯文本字符串（DeepSeek 兼容格式）
         """
-        content = []
+        parts = []
         
         # 文本部分
         text = multimodal.get("text", "")
         if text:
-            content.append({"type": "text", "text": text})
+            parts.append(text)
         
-        # 图片部分（URL 优先）
+        # 图片部分 - 转换为文本提示，让 Agent 调用 recognize_image 工具
         image_url = multimodal.get("image_url")
         image_base64 = multimodal.get("image_base64")
         if image_url:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": image_url}
-            })
+            # 提示 Agent 使用 recognize_image 工具处理图片
+            parts.append(f"\n\n[用户上传了一张图片，请使用 recognize_image 工具识别图片内容]\n图片URL: {image_url}")
         elif image_base64:
-            # Base64 格式需要添加 data URI 前缀
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
-            })
+            # Base64 图片也转换为提示（但 recognize_image 工具需要 URL）
+            # 这种情况下，前端应该先上传图片获取 URL
+            parts.append("\n\n[用户上传了一张图片（Base64格式），但当前无法直接处理。请告知用户重新上传图片。]")
         
         # 语音部分（voice_text 优先，如果前端已转录）
         voice_text = multimodal.get("voice_text")
-        voice_url = multimodal.get("voice_url")
         
         if voice_text:
             # 前端已转录，直接使用转录文本
             if not text:  # 如果没有文本，语音转录作为主要文本
-                content.append({"type": "text", "text": voice_text})
+                parts.append(voice_text)
             else:  # 如果有文本，语音转录作为补充
-                content.append({"type": "text", "text": f"[语音内容]: {voice_text}"})
+                parts.append(f"\n[语音内容]: {voice_text}")
         
-        # 如果只有一个文本元素，返回纯字符串（向后兼容）
-        if len(content) == 1 and content[0]["type"] == "text":
-            return content[0]["text"]
+        # 合并所有部分
+        result = "".join(parts).strip()
         
         # 如果没有任何内容，返回空字符串
-        if not content:
-            return ""
-        
-        return content
+        return result if result else ""
     
     async def _transcribe_voice(self, voice_url: str) -> str:
         """
@@ -403,6 +508,12 @@ class LearningAgent:
             content = message
             text_for_log = message
         
+        # 智能模型路由：根据消息类型获取合适的 LLM
+        llm = await self._get_llm_for_message(multimodal)
+        
+        # 创建/更新 Agent（使用选定的 LLM）
+        self._create_agent(llm)
+        
         # 准备输入
         input_data = self._prepare_input(text_for_log, context)
         
@@ -458,12 +569,13 @@ class LearningAgent:
             
         Yields:
             结构化的事件对象:
-            - type: "text" | "tool_start" | "tool_end" | "tool_error" | "thinking" | "transcription"
+            - type: "text" | "tool_start" | "tool_end" | "tool_error" | "thinking" | "transcription" | "model_info"
             - content: 文本内容
             - tool_name: 工具名称（工具事件时）
             - tool_input: 工具输入参数（tool_start 时）
             - tool_output: 工具输出结果（tool_end 时）
             - text: 语音转录文本（transcription 事件时）
+            - model_info: 当前使用的模型信息（model_info 事件时）
         """
         # 构建消息内容
         if multimodal:
@@ -485,6 +597,19 @@ class LearningAgent:
         else:
             content = message
             text_for_log = message
+        
+        # 智能模型路由：根据消息类型获取合适的 LLM
+        llm = await self._get_llm_for_message(multimodal)
+        
+        # 创建/更新 Agent（使用选定的 LLM）
+        self._create_agent(llm)
+        
+        # 发送模型信息事件（让前端知道使用了哪个模型）
+        if self._current_model_info:
+            yield {
+                "type": "model_info",
+                "model_info": self._current_model_info,
+            }
         
         # 准备输入
         input_data = self._prepare_input(text_for_log, context)
@@ -782,7 +907,12 @@ class LearningAgent:
         result: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """从对话中提取用户洞察"""
-        # 使用 LLM 分析对话
+        # 使用当前 LLM 分析对话（如果没有则使用默认）
+        llm = self._current_llm
+        if not llm:
+            # 获取默认文本模型
+            llm = await self._get_llm_for_message(None)
+        
         analysis_prompt = f"""分析以下对话，提取用户学习相关的洞察：
 
 用户消息: {user_message}
@@ -801,7 +931,7 @@ class LearningAgent:
 """
         
         try:
-            response = await self.llm.ainvoke([HumanMessage(content=analysis_prompt)])
+            response = await llm.ainvoke([HumanMessage(content=analysis_prompt)])
             content = response.content.strip()
             
             if content and content != "null":
@@ -832,6 +962,11 @@ class LearningAgent:
                 "上传一张题目图片，我来帮你解答",
             ]
         
+        # 使用当前 LLM 或获取默认文本模型
+        llm = self._current_llm
+        if not llm:
+            llm = await self._get_llm_for_message(None)
+        
         # 根据用户画像生成个性化建议
         suggestions_prompt = f"""根据以下用户画像，生成3条个性化的学习建议：
 
@@ -848,7 +983,7 @@ class LearningAgent:
 """
         
         try:
-            response = await self.llm.ainvoke([HumanMessage(content=suggestions_prompt)])
+            response = await llm.ainvoke([HumanMessage(content=suggestions_prompt)])
             return json.loads(response.content.strip())
         except Exception:
             return ["继续加油学习！", "保持学习节奏", "有问题随时问我"]
