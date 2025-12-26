@@ -353,51 +353,79 @@ class LearningAgent:
     def _build_multimodal_content(
         self,
         multimodal: Dict[str, Any],
-    ) -> str:
+        is_multimodal_model: bool = False,
+    ) -> Union[str, List[Dict[str, Any]]]:
         """
-        构建多模态消息内容（转换为纯文本）
+        构建多模态消息内容
         
-        由于 DeepSeek 不支持 image_url 类型的多模态输入，
-        我们将图片信息转换为文本提示，让 Agent 调用 recognize_image 工具处理。
+        根据模型能力选择不同的构建方式：
+        - 多模态模型（如 GPT-4o）：直接构建包含图片的消息列表
+        - 纯文本模型（如 DeepSeek）：转换为文本提示，让 Agent 调用工具处理
         
         Args:
             multimodal: 多模态消息字典，包含 text, image_url, image_base64, voice_url, voice_text
+            is_multimodal_model: 当前模型是否支持多模态输入
             
         Returns:
-            纯文本字符串（DeepSeek 兼容格式）
+            - 多模态模型：返回消息内容列表 [{"type": "text", ...}, {"type": "image_url", ...}]
+            - 纯文本模型：返回纯文本字符串
         """
-        parts = []
-        
-        # 文本部分
         text = multimodal.get("text", "")
-        if text:
-            parts.append(text)
-        
-        # 图片部分 - 转换为文本提示，让 Agent 调用 recognize_image 工具
         image_url = multimodal.get("image_url")
         image_base64 = multimodal.get("image_base64")
-        if image_url:
-            # 提示 Agent 使用 recognize_image 工具处理图片
-            parts.append(f"\n\n[用户上传了一张图片，请使用 recognize_image 工具识别图片内容]\n图片URL: {image_url}")
-        elif image_base64:
-            # Base64 图片也转换为提示（但 recognize_image 工具需要 URL）
-            # 这种情况下，前端应该先上传图片获取 URL
-            parts.append("\n\n[用户上传了一张图片（Base64格式），但当前无法直接处理。请告知用户重新上传图片。]")
-        
-        # 语音部分（voice_text 优先，如果前端已转录）
         voice_text = multimodal.get("voice_text")
         
+        # 合并文本内容
+        text_parts = []
+        if text:
+            text_parts.append(text)
         if voice_text:
-            # 前端已转录，直接使用转录文本
-            if not text:  # 如果没有文本，语音转录作为主要文本
-                parts.append(voice_text)
-            else:  # 如果有文本，语音转录作为补充
-                parts.append(f"\n[语音内容]: {voice_text}")
+            if not text:
+                text_parts.append(voice_text)
+            else:
+                text_parts.append(f"\n[语音内容]: {voice_text}")
         
-        # 合并所有部分
+        combined_text = "".join(text_parts).strip()
+        
+        # 如果是多模态模型且有图片，直接构建多模态消息
+        if is_multimodal_model and (image_url or image_base64):
+            content_parts = []
+            
+            # 添加文本部分
+            if combined_text:
+                content_parts.append({"type": "text", "text": combined_text})
+            else:
+                # 如果没有文本，添加默认提示
+                content_parts.append({"type": "text", "text": "请分析这张图片的内容。"})
+            
+            # 添加图片部分
+            if image_url:
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": image_url}
+                })
+            elif image_base64:
+                # Base64 格式图片
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+                })
+            
+            logger.info(f"[LearningAgent] 构建多模态消息: {len(content_parts)} 部分")
+            return content_parts
+        
+        # 纯文本模型：转换为文本提示
+        parts = []
+        if combined_text:
+            parts.append(combined_text)
+        
+        # 图片部分 - 转换为文本提示，让 Agent 调用 recognize_image 工具
+        if image_url:
+            parts.append(f"\n\n[用户上传了一张图片，请使用 recognize_image 工具识别图片内容]\n图片URL: {image_url}")
+        elif image_base64:
+            parts.append("\n\n[用户上传了一张图片（Base64格式），但当前无法直接处理。请告知用户重新上传图片。]")
+        
         result = "".join(parts).strip()
-        
-        # 如果没有任何内容，返回空字符串
         return result if result else ""
     
     async def _transcribe_voice(self, voice_url: str) -> str:
@@ -494,6 +522,16 @@ class LearningAgent:
         Returns:
             Agent 回复
         """
+        # 智能模型路由：根据消息类型获取合适的 LLM（需要先获取，才能知道是否支持多模态）
+        llm = await self._get_llm_for_message(multimodal)
+        
+        # 判断当前模型是否支持多模态
+        is_multimodal_model = (
+            self._current_model_info and 
+            self._current_model_info.get("type") == "multimodal" and
+            self._current_model_info.get("is_user_config", False)
+        )
+        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL 但没有转录文本，先转录
@@ -504,15 +542,12 @@ class LearningAgent:
                 except Exception as e:
                     logger.error(f"[LearningAgent] 语音转录失败，降级到文本: {e}")
             
-            content = self._build_multimodal_content(multimodal)
+            content = self._build_multimodal_content(multimodal, is_multimodal_model)
             # 用于记录的文本消息
             text_for_log = multimodal.get("text") or multimodal.get("voice_text") or "[多模态消息]"
         else:
             content = message
             text_for_log = message
-        
-        # 智能模型路由：根据消息类型获取合适的 LLM
-        llm = await self._get_llm_for_message(multimodal)
         
         # 创建/更新 Agent（使用选定的 LLM）
         self._create_agent(llm)
@@ -580,6 +615,16 @@ class LearningAgent:
             - text: 语音转录文本（transcription 事件时）
             - model_info: 当前使用的模型信息（model_info 事件时）
         """
+        # 智能模型路由：根据消息类型获取合适的 LLM（需要先获取，才能知道是否支持多模态）
+        llm = await self._get_llm_for_message(multimodal)
+        
+        # 判断当前模型是否支持多模态
+        is_multimodal_model = (
+            self._current_model_info and 
+            self._current_model_info.get("type") == "multimodal" and
+            self._current_model_info.get("is_user_config", False)
+        )
+        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL 但没有转录文本，先转录
@@ -594,15 +639,12 @@ class LearningAgent:
                     yield {"type": "error", "error": f"语音转录失败: {str(e)}"}
                     return
             
-            content = self._build_multimodal_content(multimodal)
+            content = self._build_multimodal_content(multimodal, is_multimodal_model)
             # 用于记录的文本消息
             text_for_log = multimodal.get("text") or multimodal.get("voice_text") or "[多模态消息]"
         else:
             content = message
             text_for_log = message
-        
-        # 智能模型路由：根据消息类型获取合适的 LLM
-        llm = await self._get_llm_for_message(multimodal)
         
         # 创建/更新 Agent（使用选定的 LLM）
         self._create_agent(llm)
