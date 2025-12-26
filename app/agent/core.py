@@ -767,22 +767,17 @@ class LearningAgent:
                 
                 logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}")
                 
-                if supports_direct_audio and is_multimodal_model:
-                    # 模型支持直接音频输入，下载并编码音频，跳过转录
-                    try:
-                        voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
-                        logger.info(f"[LearningAgent] 将直接发送音频给模型（跳过转录）")
-                    except Exception as e:
-                        logger.error(f"[LearningAgent] 下载音频失败，降级到转录: {e}")
-                        supports_direct_audio = False
+                # 注意：LangChain 的 ChatOpenAI 不支持 input_audio 内容类型
+                # 即使模型支持直接音频输入（如 qwen-omni），也需要先转录为文本
+                # 因为 LangChain 只支持 text 和 image_url 内容类型
+                # 所以这里始终走转录路径，使用 Chat API 进行语音转文本
                 
-                if not supports_direct_audio or not voice_base64:
-                    # 需要先转录语音
-                    try:
-                        transcribed = await self._transcribe_voice(multimodal["voice_url"])
-                        multimodal["voice_text"] = transcribed
-                    except Exception as e:
-                        logger.error(f"[LearningAgent] 语音转录失败，降级到文本: {e}")
+                # 始终转录语音
+                try:
+                    transcribed = await self._transcribe_voice(multimodal["voice_url"])
+                    multimodal["voice_text"] = transcribed
+                except Exception as e:
+                    logger.error(f"[LearningAgent] 语音转录失败，降级到文本: {e}")
             
             content = self._build_multimodal_content(
                 multimodal, 
@@ -896,29 +891,21 @@ class LearningAgent:
                 
                 logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}")
                 
-                if supports_direct_audio and is_multimodal_model:
-                    # 模型支持直接音频输入，下载并编码音频，跳过转录
-                    try:
-                        voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
-                        logger.info(f"[LearningAgent] 将直接发送音频给模型（跳过转录）")
-                        # 发送提示事件
-                        yield {"type": "thinking", "content": "正在处理语音..."}
-                    except Exception as e:
-                        logger.error(f"[LearningAgent] 下载音频失败，降级到转录: {e}")
-                        # 降级到转录模式
-                        supports_direct_audio = False
+                # 注意：LangChain 的 ChatOpenAI 不支持 input_audio 内容类型
+                # 即使模型支持直接音频输入（如 qwen-omni），也需要先转录为文本
+                # 因为 LangChain 只支持 text 和 image_url 内容类型
+                # 所以这里始终走转录路径，使用 Chat API 进行语音转文本
                 
-                if not supports_direct_audio or not voice_base64:
-                    # 需要先转录语音
-                    try:
-                        transcribed = await self._transcribe_voice(multimodal["voice_url"])
-                        multimodal["voice_text"] = transcribed
-                        # 发送转录事件
-                        yield {"type": "transcription", "text": transcribed}
-                    except Exception as e:
-                        logger.error(f"[LearningAgent] 语音转录失败: {e}")
-                        yield {"type": "error", "error": f"语音转录失败: {str(e)}"}
-                        return
+                # 始终转录语音
+                try:
+                    transcribed = await self._transcribe_voice(multimodal["voice_url"])
+                    multimodal["voice_text"] = transcribed
+                    # 发送转录事件
+                    yield {"type": "transcription", "text": transcribed}
+                except Exception as e:
+                    logger.error(f"[LearningAgent] 语音转录失败: {e}")
+                    yield {"type": "error", "error": f"语音转录失败: {str(e)}"}
+                    return
             
             content = self._build_multimodal_content(
                 multimodal, 
