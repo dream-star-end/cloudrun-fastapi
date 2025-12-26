@@ -511,17 +511,22 @@ class LearningAgent:
                     mime_type = "audio/mpeg"
                 
                 # 判断使用哪种 API 模式
-                # 自定义平台或包含特定关键词的平台使用 Chat Completions API
-                # qwen-omni 系列模型也使用 Chat API（支持 input_audio）
+                # qwen-omni 模型虽然支持音频输入，但用于转录时应使用 STT API（paraformer）
+                # Chat API 适用于需要对话能力的场景，纯转录用 STT 更高效
                 is_qwen_omni = any(pattern in model.lower() for pattern in ["qwen-omni", "qwen2.5-omni", "qwen3-omni", "qwen-audio"])
                 
+                # qwen 平台（包括 omni 模型）使用 STT API
+                # 其他多模态模型使用 Chat API
                 use_chat_api = (
-                    is_qwen_omni or
-                    platform.startswith("custom_") or
-                    "openrouter" in base_url.lower() or
-                    "gemini" in model.lower() or
-                    "claude" in model.lower() or
-                    "gpt-4" in model.lower()
+                    not is_qwen_omni and  # qwen-omni 用 STT API
+                    platform != "qwen" and  # qwen 平台用 STT API
+                    (
+                        platform.startswith("custom_") or
+                        "openrouter" in base_url.lower() or
+                        "gemini" in model.lower() or
+                        "claude" in model.lower() or
+                        "gpt-4" in model.lower()
+                    )
                 )
                 
                 if use_chat_api:
