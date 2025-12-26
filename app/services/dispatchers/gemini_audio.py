@@ -104,6 +104,19 @@ class GeminiAudioDispatcher(GeminiDispatcher):
         # 构建包含音频的消息
         audio_messages = MessageConverter.to_openrouter_audio_format(messages, voice_url)
         
+        # 调试日志：打印转换后的消息结构
+        logger.info(f"[GeminiAudioDispatcher] 原始消息数量: {len(messages)}")
+        logger.info(f"[GeminiAudioDispatcher] 转换后消息数量: {len(audio_messages)}")
+        for i, msg in enumerate(audio_messages):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content_types = [item.get("type", "unknown") for item in content]
+                logger.info(f"[GeminiAudioDispatcher] 消息[{i}] role={role}, content_types={content_types}")
+            else:
+                content_preview = content[:100] if isinstance(content, str) else str(content)[:100]
+                logger.info(f"[GeminiAudioDispatcher] 消息[{i}] role={role}, content={content_preview}...")
+        
         request_body = {
             "model": model,
             "messages": audio_messages,
@@ -279,45 +292,58 @@ class GeminiAudioDispatcher(GeminiDispatcher):
             except Exception as e:
                 logger.warning(f"[GeminiAudioDispatcher] 音频下载失败: {e}")
         
-        # 构建消息
-        user_text = ""
+        # 构建消息，保留完整对话历史
         result_messages = []
+        last_user_index = -1
+        last_user_text = ""
         
-        for msg in messages:
+        # 先找到最后一条用户消息
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                last_user_index = i
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    last_user_text = content
+                elif isinstance(content, list):
+                    for item in content:
+                        if item.get("type") == "text":
+                            last_user_text = item.get("text", "")
+                            break
+        
+        # 遍历所有消息，保留历史
+        for i, msg in enumerate(messages):
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
             if role == "user":
-                if isinstance(content, str):
-                    user_text = content
-                elif isinstance(content, list):
-                    for item in content:
-                        if item.get("type") == "text":
-                            user_text = item.get("text", "")
-                            break
+                if i == last_user_index:
+                    # 最后一条用户消息：添加音频
+                    prompt = last_user_text or "请听取并回复这段语音内容"
+                    
+                    if audio_base64:
+                        user_content = [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "input_audio",
+                                "input_audio": {
+                                    "data": audio_base64,
+                                    "format": mime_type.split("/")[-1]
+                                }
+                            }
+                        ]
+                        result_messages.append({"role": "user", "content": user_content})
+                    else:
+                        # 无法获取音频，降级到纯文本
+                        logger.warning(f"[GeminiAudioDispatcher] 无法获取音频，降级到文本处理")
+                        result_messages.append({"role": "user", "content": f"{prompt}\n\n[注意：语音文件无法访问]"})
+                else:
+                    # 历史用户消息：保持纯文本
+                    text_content = MessageConverter._extract_text_content(content)
+                    result_messages.append({"role": "user", "content": text_content})
             else:
-                result_messages.append({"role": role, "content": content})
-        
-        # 构建用户消息
-        prompt = user_text or "请听取并回复这段语音内容"
-        
-        if audio_base64:
-            # 使用 base64 音频
-            user_content = [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "input_audio",
-                    "input_audio": {
-                        "data": audio_base64,
-                        "format": mime_type.split("/")[-1]
-                    }
-                }
-            ]
-            result_messages.append({"role": "user", "content": user_content})
-        else:
-            # 无法获取音频，降级到纯文本
-            logger.warning(f"[GeminiAudioDispatcher] 无法获取音频，降级到文本处理")
-            result_messages.append({"role": "user", "content": f"{prompt}\n\n[注意：语音文件无法访问]"})
+                # 非用户消息，保持原样（提取文本）
+                text_content = MessageConverter._extract_text_content(content) if isinstance(content, list) else content
+                result_messages.append({"role": role, "content": text_content})
         
         # 调用 API
         from .openai_compatible import OpenAICompatibleDispatcher

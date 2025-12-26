@@ -231,6 +231,8 @@ class MessageConverter:
             ]
         }
         
+        保留完整对话历史，只将最后一条用户消息转换为音频格式。
+        
         Args:
             messages: 原始消息列表
             voice_url: 语音文件 URL
@@ -239,9 +241,17 @@ class MessageConverter:
             OpenRouter 格式的消息列表
         """
         result = []
-        user_text = ""
+        last_user_index = -1
+        last_user_text = ""
         
-        for msg in messages:
+        # 先找到最后一条用户消息的位置
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user":
+                last_user_index = i
+                last_user_text = cls._extract_text_content(msg.get("content", ""))
+        
+        # 遍历所有消息，保留历史
+        for i, msg in enumerate(messages):
             role = msg.get("role", "user")
             content = msg.get("content", "")
             
@@ -249,25 +259,28 @@ class MessageConverter:
                 # 系统消息保持不变
                 result.append({"role": "system", "content": content})
             elif role == "user":
-                # 提取用户文本
-                user_text = cls._extract_text_content(content)
+                if i == last_user_index:
+                    # 最后一条用户消息：转换为音频格式
+                    prompt = last_user_text or "请听取并回复这段语音内容"
+                    user_content = [
+                        {"type": "text", "text": prompt},
+                    ]
+                    
+                    if voice_url:
+                        user_content.append({
+                            "type": "input_audio",
+                            "input_audio": {"url": voice_url}
+                        })
+                    
+                    result.append({"role": "user", "content": user_content})
+                else:
+                    # 历史用户消息：保持纯文本格式
+                    text_content = cls._extract_text_content(content)
+                    result.append({"role": "user", "content": text_content})
             else:
                 # assistant 等其他角色消息保持不变
-                result.append({"role": role, "content": content})
-        
-        # 构建包含音频的用户消息
-        prompt = user_text or "请听取并回复这段语音内容"
-        user_content = [
-            {"type": "text", "text": prompt},
-        ]
-        
-        if voice_url:
-            user_content.append({
-                "type": "input_audio",
-                "input_audio": {"url": voice_url}
-            })
-        
-        result.append({"role": "user", "content": user_content})
+                text_content = cls._extract_text_content(content) if isinstance(content, list) else content
+                result.append({"role": role, "content": text_content})
         
         return result
     
