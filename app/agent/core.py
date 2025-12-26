@@ -352,20 +352,24 @@ class LearningAgent:
         self,
         multimodal: Dict[str, Any],
         is_multimodal_model: bool = False,
+        voice_base64: Optional[str] = None,
+        voice_format: str = "mp3",
     ) -> Union[str, List[Dict[str, Any]]]:
         """
         构建多模态消息内容
         
         根据模型能力选择不同的构建方式：
-        - 多模态模型（如 GPT-4o）：直接构建包含图片的消息列表
+        - 多模态模型（如 GPT-4o、Gemini）：直接构建包含图片/音频的消息列表
         - 纯文本模型（如 DeepSeek）：转换为文本提示，让 Agent 调用工具处理
         
         Args:
             multimodal: 多模态消息字典，包含 text, image_url, image_base64, voice_url, voice_text
             is_multimodal_model: 当前模型是否支持多模态输入
+            voice_base64: 语音的 base64 编码（用于直接发送给支持音频的模型）
+            voice_format: 语音格式（mp3, wav 等）
             
         Returns:
-            - 多模态模型：返回消息内容列表 [{"type": "text", ...}, {"type": "image_url", ...}]
+            - 多模态模型：返回消息内容列表 [{"type": "text", ...}, {"type": "image_url", ...}, {"type": "input_audio", ...}]
             - 纯文本模型：返回纯文本字符串
         """
         text = multimodal.get("text", "")
@@ -385,15 +389,22 @@ class LearningAgent:
         
         combined_text = "".join(text_parts).strip()
         
-        # 如果是多模态模型且有图片，直接构建多模态消息
-        if is_multimodal_model and (image_url or image_base64):
+        # 检查是否有图片或音频需要处理
+        has_image = image_url or image_base64
+        has_audio = voice_base64 is not None
+        
+        # 如果是多模态模型且有图片或音频，直接构建多模态消息
+        if is_multimodal_model and (has_image or has_audio):
             content_parts = []
             
             # 添加文本部分
             if combined_text:
                 content_parts.append({"type": "text", "text": combined_text})
+            elif has_audio:
+                # 如果只有音频没有文本，添加默认提示
+                content_parts.append({"type": "text", "text": "请理解并回复这段语音消息。"})
             else:
-                # 如果没有文本，添加默认提示
+                # 如果只有图片没有文本，添加默认提示
                 content_parts.append({"type": "text", "text": "请分析这张图片的内容。"})
             
             # 添加图片部分
@@ -408,6 +419,17 @@ class LearningAgent:
                     "type": "image_url",
                     "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
                 })
+            
+            # 添加音频部分（直接发送给支持音频输入的模型）
+            if has_audio:
+                content_parts.append({
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": voice_base64,
+                        "format": voice_format,
+                    }
+                })
+                logger.info(f"[LearningAgent] 添加音频内容: format={voice_format}, size={len(voice_base64)} chars")
             
             logger.info(f"[LearningAgent] 构建多模态消息: {len(content_parts)} 部分")
             return content_parts
@@ -514,6 +536,47 @@ class LearningAgent:
         except Exception as e:
             logger.error(f"[LearningAgent] 语音转录失败: {e}")
             raise
+    
+    async def _download_and_encode_audio(self, voice_url: str) -> tuple:
+        """
+        下载音频并编码为 base64
+        
+        Args:
+            voice_url: 语音文件 URL
+            
+        Returns:
+            (audio_base64, audio_format) 元组
+        """
+        import httpx
+        import base64
+        from ..config import get_http_client_kwargs
+        
+        logger.info(f"[LearningAgent] 下载音频: {voice_url[:50]}...")
+        
+        async with httpx.AsyncClient(**get_http_client_kwargs(60.0)) as client:
+            audio_response = await client.get(voice_url, follow_redirects=True)
+            if audio_response.status_code != 200:
+                raise ValueError(f"下载音频失败: HTTP {audio_response.status_code}")
+            
+            audio_data = audio_response.content
+            content_type = audio_response.headers.get("content-type", "")
+            
+            # 推断文件格式
+            if "mp3" in content_type or voice_url.endswith(".mp3"):
+                audio_format = "mp3"
+            elif "wav" in content_type or voice_url.endswith(".wav"):
+                audio_format = "wav"
+            elif "silk" in voice_url or "amr" in content_type:
+                audio_format = "mp3"
+            else:
+                audio_format = "mp3"
+            
+            # Base64 编码
+            audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+            
+            logger.info(f"[LearningAgent] 音频下载完成: format={audio_format}, size={len(audio_data)} bytes")
+            
+            return audio_base64, audio_format
     
     async def _transcribe_via_chat_api(
         self,
@@ -680,17 +743,49 @@ class LearningAgent:
         
         logger.info(f"[LearningAgent] 多模态判断: is_multimodal_model={is_multimodal_model}, has_image={has_image}, model_info={self._current_model_info}")
         
+        # 用于直接发送给模型的音频数据
+        voice_base64 = None
+        voice_format = "mp3"
+        
         # 构建消息内容
         if multimodal:
-            # 如果有语音 URL 但没有转录文本，先转录
+            # 如果有语音 URL，检查是否需要转录
             if multimodal.get("voice_url") and not multimodal.get("voice_text"):
-                try:
-                    transcribed = await self._transcribe_voice(multimodal["voice_url"])
-                    multimodal["voice_text"] = transcribed
-                except Exception as e:
-                    logger.error(f"[LearningAgent] 语音转录失败，降级到文本: {e}")
+                # 获取语音模型配置，检查是否支持直接音频输入
+                voice_config = await ModelConfigService.get_model_for_type(
+                    openid=self.user_id,
+                    model_type="voice",
+                )
+                model_types = voice_config.get("model_types", [])
+                
+                # 检查模型是否同时支持 text 和 voice（可以直接处理音频）
+                supports_direct_audio = "text" in model_types and "voice" in model_types
+                
+                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}")
+                
+                if supports_direct_audio and is_multimodal_model:
+                    # 模型支持直接音频输入，下载并编码音频，跳过转录
+                    try:
+                        voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
+                        logger.info(f"[LearningAgent] 将直接发送音频给模型（跳过转录）")
+                    except Exception as e:
+                        logger.error(f"[LearningAgent] 下载音频失败，降级到转录: {e}")
+                        supports_direct_audio = False
+                
+                if not supports_direct_audio or not voice_base64:
+                    # 需要先转录语音
+                    try:
+                        transcribed = await self._transcribe_voice(multimodal["voice_url"])
+                        multimodal["voice_text"] = transcribed
+                    except Exception as e:
+                        logger.error(f"[LearningAgent] 语音转录失败，降级到文本: {e}")
             
-            content = self._build_multimodal_content(multimodal, is_multimodal_model)
+            content = self._build_multimodal_content(
+                multimodal, 
+                is_multimodal_model,
+                voice_base64=voice_base64,
+                voice_format=voice_format,
+            )
             # 用于记录的文本消息
             text_for_log = multimodal.get("text") or multimodal.get("voice_text") or "[多模态消息]"
         else:
@@ -777,21 +872,56 @@ class LearningAgent:
         
         logger.info(f"[LearningAgent] 流式多模态判断: is_multimodal_model={is_multimodal_model}, has_image={has_image}, model_info={self._current_model_info}")
         
+        # 用于直接发送给模型的音频数据
+        voice_base64 = None
+        voice_format = "mp3"
+        
         # 构建消息内容
         if multimodal:
-            # 如果有语音 URL 但没有转录文本，先转录
+            # 如果有语音 URL，检查是否需要转录
             if multimodal.get("voice_url") and not multimodal.get("voice_text"):
-                try:
-                    transcribed = await self._transcribe_voice(multimodal["voice_url"])
-                    multimodal["voice_text"] = transcribed
-                    # 发送转录事件
-                    yield {"type": "transcription", "text": transcribed}
-                except Exception as e:
-                    logger.error(f"[LearningAgent] 语音转录失败: {e}")
-                    yield {"type": "error", "error": f"语音转录失败: {str(e)}"}
-                    return
+                # 获取语音模型配置，检查是否支持直接音频输入
+                voice_config = await ModelConfigService.get_model_for_type(
+                    openid=self.user_id,
+                    model_type="voice",
+                )
+                model_types = voice_config.get("model_types", [])
+                
+                # 检查模型是否同时支持 text 和 voice（可以直接处理音频）
+                supports_direct_audio = "text" in model_types and "voice" in model_types
+                
+                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}")
+                
+                if supports_direct_audio and is_multimodal_model:
+                    # 模型支持直接音频输入，下载并编码音频，跳过转录
+                    try:
+                        voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
+                        logger.info(f"[LearningAgent] 将直接发送音频给模型（跳过转录）")
+                        # 发送提示事件
+                        yield {"type": "thinking", "content": "正在处理语音..."}
+                    except Exception as e:
+                        logger.error(f"[LearningAgent] 下载音频失败，降级到转录: {e}")
+                        # 降级到转录模式
+                        supports_direct_audio = False
+                
+                if not supports_direct_audio or not voice_base64:
+                    # 需要先转录语音
+                    try:
+                        transcribed = await self._transcribe_voice(multimodal["voice_url"])
+                        multimodal["voice_text"] = transcribed
+                        # 发送转录事件
+                        yield {"type": "transcription", "text": transcribed}
+                    except Exception as e:
+                        logger.error(f"[LearningAgent] 语音转录失败: {e}")
+                        yield {"type": "error", "error": f"语音转录失败: {str(e)}"}
+                        return
             
-            content = self._build_multimodal_content(multimodal, is_multimodal_model)
+            content = self._build_multimodal_content(
+                multimodal, 
+                is_multimodal_model,
+                voice_base64=voice_base64,
+                voice_format=voice_format,
+            )
             # 用于记录的文本消息
             text_for_log = multimodal.get("text") or multimodal.get("voice_text") or "[多模态消息]"
         else:

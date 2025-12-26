@@ -162,7 +162,8 @@ class ModelConfigService:
             model_type: 模型类型 (text/voice/multimodal/vision)
             
         Returns:
-            模型配置字典，包含 platform, model, base_url, api_key 等
+            模型配置字典，包含 platform, model, base_url, api_key, model_types 等
+            model_types: 模型支持的输入类型列表，如 ["text", "voice"]
         """
         # vision 和 multimodal 统一处理
         if model_type == "vision":
@@ -180,6 +181,8 @@ class ModelConfigService:
             config_id = default_setting["configId"]
             model_id = default_setting.get("modelId")
             model_name = default_setting.get("modelName")
+            # 获取模型支持的输入类型（用户在配置时选择的标签）
+            model_types = default_setting.get("modelTypes", [])
             
             # 查找平台配置
             platform_config = cls._find_platform_config(
@@ -187,7 +190,7 @@ class ModelConfigService:
             )
             
             if platform_config and platform_config.get("apiKey"):
-                logger.info(f"[ModelConfigService] 使用用户配置: type={model_type}, platform={config_id}, model={model_id}")
+                logger.info(f"[ModelConfigService] 使用用户配置: type={model_type}, platform={config_id}, model={model_id}, model_types={model_types}")
                 return {
                     "platform": config_id,
                     "model": model_id or model_name,
@@ -195,6 +198,7 @@ class ModelConfigService:
                     "base_url": platform_config.get("baseUrl") or cls._get_platform_base_url(config_id),
                     "api_key": platform_config["apiKey"],
                     "is_user_config": True,
+                    "model_types": model_types,  # 模型支持的输入类型
                 }
         
         # 用户未配置或配置无效，使用系统默认
@@ -210,6 +214,7 @@ class ModelConfigService:
             "base_url": system_default["base_url"],
             "api_key": "",  # 系统默认不提供 API Key，需要用户配置
             "is_user_config": False,
+            "model_types": ["text"],  # 系统默认只支持文本
         }
     
     @classmethod
