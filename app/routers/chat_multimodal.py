@@ -210,6 +210,10 @@ async def _stream_response(
                     
                     yield f"data: {json.dumps(sse_data)}\n\n"
                 
+                elif event_type == "transcription":
+                    # 语音转文本结果
+                    yield f"data: {json.dumps({'type': 'transcription', 'text': event.get('text', '')})}\n\n"
+                
                 elif event_type == "fallback_notice":
                     yield f"data: {json.dumps(event)}\n\n"
                 

@@ -57,15 +57,23 @@ class ModelDispatcher(ABC):
         Returns:
             对应的分发器实例
         """
+        model_lower = model.lower()
+        
         # Gemini 模型且有语音输入，使用 Gemini 音频分发器
-        if model.lower().startswith("gemini") and has_voice:
+        if model_lower.startswith("gemini") and has_voice:
             logger.info(f"[Dispatcher] 使用 GeminiAudioDispatcher: model={model}")
             return GeminiAudioDispatcher()
         
         # Gemini 模型（无语音），使用 Gemini 通用分发器
-        if model.lower().startswith("gemini"):
+        if model_lower.startswith("gemini"):
             logger.info(f"[Dispatcher] 使用 GeminiDispatcher: model={model}")
             return GeminiDispatcher()
+        
+        # OpenAI TTS/Whisper 模型且有语音输入，使用 STT 分发器
+        # tts-1, tts-1-hd, whisper-1 等
+        if has_voice and (model_lower.startswith("tts") or model_lower.startswith("whisper")):
+            logger.info(f"[Dispatcher] 使用 OpenAISTTDispatcher: model={model}")
+            return OpenAISTTDispatcher()
         
         # 默认使用 OpenAI 兼容分发器
         logger.info(f"[Dispatcher] 使用 OpenAICompatibleDispatcher: platform={platform}, model={model}")
@@ -605,3 +613,255 @@ class GeminiAudioDispatcher(GeminiDispatcher):
         else:
             # 默认 MP3
             return "audio/mp3"
+
+
+class OpenAISTTDispatcher(ModelDispatcher):
+    """
+    OpenAI 语音转文本分发器
+    
+    流程：
+    1. 调用 /audio/transcriptions 接口将语音转为文本
+    2. 再调用文本模型处理转换后的文本
+    
+    支持的模型：tts-1, tts-1-hd, whisper-1 等
+    参考: https://platform.openai.com/docs/api-reference/audio/createTranscription
+    """
+    
+    async def call(
+        self,
+        config: Dict[str, Any],
+        messages: List[Dict],
+        stream: bool,
+        openid: str = None,
+        voice_url: str = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        调用 OpenAI STT API 进行语音转文本，然后调用文本模型
+        
+        Args:
+            config: 模型配置（语音模型配置）
+            messages: 消息列表
+            stream: 是否流式
+            openid: 用户标识
+            voice_url: 语音文件URL
+        """
+        base_url = config["base_url"]
+        api_key = config["api_key"]
+        stt_model = config["model"]  # tts-1, whisper-1 等
+        
+        logger.info(f"[OpenAISTTDispatcher] 开始处理语音: voice_url={voice_url[:50] if voice_url else 'None'}...")
+        logger.info(f"[OpenAISTTDispatcher] STT 模型: {stt_model}")
+        
+        if not voice_url:
+            logger.warning(f"[OpenAISTTDispatcher] 没有语音URL，降级到文本处理")
+            dispatcher = OpenAICompatibleDispatcher()
+            async for event in dispatcher.call(config, messages, stream, openid, voice_url):
+                yield event
+            return
+        
+        # Step 1: 语音转文本
+        try:
+            transcribed_text = await self._transcribe_audio(
+                base_url=base_url,
+                api_key=api_key,
+                model=stt_model,
+                voice_url=voice_url,
+                openid=openid,
+            )
+            logger.info(f"[OpenAISTTDispatcher] 语音转文本成功: {transcribed_text[:100]}...")
+            
+            # 发送转录通知
+            yield {
+                "type": "transcription",
+                "text": transcribed_text,
+            }
+            
+        except Exception as e:
+            logger.error(f"[OpenAISTTDispatcher] 语音转文本失败: {e}")
+            yield {
+                "type": "error",
+                "error": f"语音转文本失败: {str(e)}",
+            }
+            return
+        
+        # Step 2: 用转录文本替换消息中的语音内容，调用文本模型
+        text_messages = self._build_text_messages(messages, transcribed_text)
+        
+        # 获取文本模型配置（使用默认的 DeepSeek）
+        from ..config import settings
+        text_config = {
+            "platform": "deepseek",
+            "model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": settings.DEEPSEEK_API_KEY,
+        }
+        
+        logger.info(f"[OpenAISTTDispatcher] 调用文本模型: {text_config['model']}")
+        
+        # 调用文本模型
+        dispatcher = OpenAICompatibleDispatcher()
+        async for event in dispatcher.call(text_config, text_messages, stream, openid, None):
+            yield event
+    
+    async def _transcribe_audio(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        voice_url: str,
+        openid: str = None,
+    ) -> str:
+        """
+        调用 OpenAI 语音转文本 API
+        
+        Args:
+            base_url: API 基础 URL
+            api_key: API Key
+            model: STT 模型名称
+            voice_url: 语音文件 URL
+            openid: 用户标识
+            
+        Returns:
+            转录的文本
+        """
+        # 先下载音频文件
+        logger.info(f"[OpenAISTTDispatcher] 下载音频文件: {voice_url[:80]}...")
+        
+        async with httpx.AsyncClient(**get_http_client_kwargs(60.0)) as client:
+            # 下载音频
+            audio_response = await client.get(voice_url)
+            if audio_response.status_code != 200:
+                raise ValueError(f"下载音频失败: HTTP {audio_response.status_code}")
+            
+            audio_data = audio_response.content
+            logger.info(f"[OpenAISTTDispatcher] 音频下载完成: {len(audio_data)} bytes")
+            
+            # 推断文件格式
+            content_type = audio_response.headers.get("content-type", "")
+            filename = self._get_filename_from_url(voice_url, content_type)
+            
+            # 调用 STT API
+            # 使用 multipart/form-data 格式
+            transcription_url = f"{base_url}/audio/transcriptions"
+            
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+            }
+            
+            # 构建 multipart 表单
+            files = {
+                "file": (filename, audio_data, self._get_mime_type(filename)),
+            }
+            data = {
+                "model": model if model.startswith("whisper") else "whisper-1",  # STT 只支持 whisper 模型
+            }
+            
+            logger.info(f"[OpenAISTTDispatcher] 调用 STT API: {transcription_url}")
+            logger.info(f"[OpenAISTTDispatcher] 文件名: {filename}, 模型: {data['model']}")
+            
+            response = await client.post(
+                transcription_url,
+                headers=headers,
+                files=files,
+                data=data,
+            )
+            
+            if response.status_code != 200:
+                error_text = response.text[:500] if response.text else "无响应内容"
+                logger.error(f"[OpenAISTTDispatcher] STT API 错误: {response.status_code}, {error_text}")
+                log_model_error(
+                    message=f"STT API 错误",
+                    platform="openai",
+                    model=model,
+                    openid=openid,
+                    status_code=response.status_code,
+                    response_body=error_text,
+                )
+                raise ValueError(f"STT API 错误 ({response.status_code}): {error_text[:100]}")
+            
+            result = response.json()
+            return result.get("text", "")
+    
+    def _get_filename_from_url(self, url: str, content_type: str = "") -> str:
+        """从 URL 或 Content-Type 推断文件名"""
+        url_lower = url.lower()
+        
+        if ".mp3" in url_lower:
+            return "audio.mp3"
+        elif ".wav" in url_lower:
+            return "audio.wav"
+        elif ".m4a" in url_lower:
+            return "audio.m4a"
+        elif ".webm" in url_lower:
+            return "audio.webm"
+        elif ".ogg" in url_lower:
+            return "audio.ogg"
+        elif ".flac" in url_lower:
+            return "audio.flac"
+        elif "mp3" in content_type:
+            return "audio.mp3"
+        elif "wav" in content_type:
+            return "audio.wav"
+        elif "m4a" in content_type or "mp4" in content_type:
+            return "audio.m4a"
+        else:
+            # 默认 mp3
+            return "audio.mp3"
+    
+    def _get_mime_type(self, filename: str) -> str:
+        """根据文件名获取 MIME 类型"""
+        ext = filename.split(".")[-1].lower()
+        mime_map = {
+            "mp3": "audio/mpeg",
+            "wav": "audio/wav",
+            "m4a": "audio/m4a",
+            "webm": "audio/webm",
+            "ogg": "audio/ogg",
+            "flac": "audio/flac",
+        }
+        return mime_map.get(ext, "audio/mpeg")
+    
+    def _build_text_messages(
+        self,
+        messages: List[Dict],
+        transcribed_text: str,
+    ) -> List[Dict]:
+        """
+        用转录文本构建新的消息列表
+        
+        将原消息中的语音相关内容替换为转录文本
+        """
+        new_messages = []
+        
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            
+            if role == "user":
+                # 用户消息：用转录文本替换
+                if isinstance(content, str):
+                    # 如果原内容为空或是占位符，使用转录文本
+                    if not content or content in ["请听取并回复这段语音内容", ""]:
+                        new_messages.append({"role": "user", "content": transcribed_text})
+                    else:
+                        # 保留原文本，追加转录内容
+                        new_messages.append({"role": "user", "content": f"{content}\n\n[语音内容]: {transcribed_text}"})
+                elif isinstance(content, list):
+                    # 多模态内容，提取文本部分
+                    text_parts = []
+                    for item in content:
+                        if item.get("type") == "text":
+                            text_parts.append(item.get("text", ""))
+                    
+                    combined_text = " ".join(text_parts).strip()
+                    if combined_text:
+                        new_messages.append({"role": "user", "content": f"{combined_text}\n\n[语音内容]: {transcribed_text}"})
+                    else:
+                        new_messages.append({"role": "user", "content": transcribed_text})
+                else:
+                    new_messages.append({"role": "user", "content": transcribed_text})
+            else:
+                # 非用户消息，保持原样
+                new_messages.append({"role": role, "content": content})
+        
+        return new_messages
