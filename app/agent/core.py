@@ -37,10 +37,9 @@ LEARNING_COACH_PROMPT = """你是一位专业的 AI 学习教练，名叫"小智
 - **create_learning_plan**: 为用户创建个性化学习计划
 - **generate_daily_tasks**: 生成每日学习任务
 
-### 🔍 搜索与识别
+### 🔍 搜索
 - **search_resources**: 联网搜索学习资源和资料
 - **search_learning_materials**: 搜索特定学习材料
-- **recognize_image**: 识别图片内容（OCR、公式、解释等）
 
 ### 📝 任务管理
 - **get_today_tasks**: 获取今日学习任务列表
@@ -129,8 +128,7 @@ READING_COMPANION_PROMPT = """你是一位智能伴读助手，名叫"小智"。
 ## 你的能力
 你拥有以下工具，可以根据需要调用：
 
-### 🔍 识别与搜索
-- **recognize_image**: 识别图片中的文字、公式、图表
+### 🔍 搜索
 - **search_resources**: 搜索相关的补充资料
 - **search_learning_materials**: 搜索学习材料
 
@@ -327,7 +325,7 @@ class LearningAgent:
         
         return llm
     
-    def _create_agent(self, llm: ChatOpenAI, exclude_tools: List[str] = None):
+    def _create_agent(self, llm: ChatOpenAI):
         """
         创建 LangGraph ReAct Agent
         
@@ -340,21 +338,13 @@ class LearningAgent:
         
         Args:
             llm: ChatOpenAI 实例（根据消息类型动态选择）
-            exclude_tools: 要排除的工具名称列表（如多模态模型处理图片时排除 recognize_image）
         """
-        # 根据是否需要排除工具来选择工具列表
-        if exclude_tools:
-            tools = [t for t in self.tools if t.name not in exclude_tools]
-            logger.info(f"[LearningAgent] 排除工具: {exclude_tools}, 剩余工具数: {len(tools)}")
-        else:
-            tools = self.tools
-        
         # 使用 LangGraph 创建 ReAct Agent
         # create_react_agent 返回一个 CompiledGraph
         # 系统提示通过 _build_system_message() 动态构建并作为 SystemMessage 添加
         self.agent = create_react_agent(
             model=llm,
-            tools=tools,
+            tools=self.tools,
             checkpointer=self.checkpointer,  # 启用对话状态持久化
         )
     
@@ -544,13 +534,6 @@ class LearningAgent:
         
         logger.info(f"[LearningAgent] 多模态判断: is_multimodal_model={is_multimodal_model}, has_image={has_image}, model_info={self._current_model_info}")
         
-        # 决定是否排除 recognize_image 工具
-        # 当使用多模态模型且有图片时，模型可以直接处理图片，不需要 recognize_image 工具
-        exclude_tools = None
-        if is_multimodal_model and has_image:
-            exclude_tools = ["recognize_image"]
-            logger.info("[LearningAgent] 多模态模型直接处理图片，排除 recognize_image 工具")
-        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL 但没有转录文本，先转录
@@ -568,8 +551,8 @@ class LearningAgent:
             content = message
             text_for_log = message
         
-        # 创建/更新 Agent（使用选定的 LLM，并根据需要排除工具）
-        self._create_agent(llm, exclude_tools=exclude_tools)
+        # 创建/更新 Agent（使用选定的 LLM）
+        self._create_agent(llm)
         
         # 准备输入
         input_data = self._prepare_input(text_for_log, context)
@@ -648,13 +631,6 @@ class LearningAgent:
         
         logger.info(f"[LearningAgent] 流式多模态判断: is_multimodal_model={is_multimodal_model}, has_image={has_image}, model_info={self._current_model_info}")
         
-        # 决定是否排除 recognize_image 工具
-        # 当使用多模态模型且有图片时，模型可以直接处理图片，不需要 recognize_image 工具
-        exclude_tools = None
-        if is_multimodal_model and has_image:
-            exclude_tools = ["recognize_image"]
-            logger.info("[LearningAgent] 流式：多模态模型直接处理图片，排除 recognize_image 工具")
-        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL 但没有转录文本，先转录
@@ -676,8 +652,8 @@ class LearningAgent:
             content = message
             text_for_log = message
         
-        # 创建/更新 Agent（使用选定的 LLM，并根据需要排除工具）
-        self._create_agent(llm, exclude_tools=exclude_tools)
+        # 创建/更新 Agent（使用选定的 LLM）
+        self._create_agent(llm)
         
         # 发送模型信息事件（让前端知道使用了哪个模型）
         if self._current_model_info:
@@ -802,9 +778,6 @@ class LearningAgent:
             # 搜索相关
             "search_resources": {"display_name": "联网搜索", "description": "在网上搜索相关资料", "icon": "🔍"},
             "search_learning_materials": {"display_name": "搜索学习资料", "description": "搜索学习相关材料", "icon": "📚"},
-            
-            # 图片识别
-            "recognize_image": {"display_name": "图片识别", "description": "识别图片中的内容", "icon": "🖼️"},
             
             # 任务管理
             "get_today_tasks": {"display_name": "获取今日任务", "description": "查看今天的学习任务", "icon": "📋"},
