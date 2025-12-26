@@ -512,7 +512,11 @@ class LearningAgent:
                 
                 # 判断使用哪种 API 模式
                 # 自定义平台或包含特定关键词的平台使用 Chat Completions API
+                # qwen-omni 系列模型也使用 Chat API（支持 input_audio）
+                is_qwen_omni = any(pattern in model.lower() for pattern in ["qwen-omni", "qwen2.5-omni", "qwen3-omni", "qwen-audio"])
+                
                 use_chat_api = (
+                    is_qwen_omni or
                     platform.startswith("custom_") or
                     "openrouter" in base_url.lower() or
                     "gemini" in model.lower() or

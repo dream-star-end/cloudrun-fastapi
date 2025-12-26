@@ -7,6 +7,7 @@
 - gemini.py: Gemini 分发器
 - gemini_audio.py: Gemini 音频分发器
 - openai_stt.py: OpenAI STT 分发器
+- qwen_omni.py: 通义千问全模态分发器
 - utils/: 工具模块
 """
 
@@ -27,6 +28,7 @@ from .openai_compatible import OpenAICompatibleDispatcher
 from .gemini import GeminiDispatcher
 from .gemini_audio import GeminiAudioDispatcher
 from .openai_stt import OpenAISTTDispatcher
+from .qwen_omni import QwenOmniDispatcher
 
 # 工具类
 from .utils import (
@@ -67,6 +69,7 @@ __all__ = [
     "GeminiDispatcher",
     "GeminiAudioDispatcher",
     "OpenAISTTDispatcher",
+    "QwenOmniDispatcher",
     # 工具类
     "AudioUtils",
     "MessageConverter",
