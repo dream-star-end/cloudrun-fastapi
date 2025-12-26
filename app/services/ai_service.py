@@ -1,4 +1,4 @@
-"""
+﻿"""
 AI 服务模块
 支持多种 AI 模型调用，包括文本、视觉模型
 """
@@ -6,6 +6,7 @@ import httpx
 import json
 from typing import List, Dict, AsyncGenerator, Optional
 from ..config import AI_MODELS, settings, get_http_client_kwargs
+from .model_config_service import ModelConfigService
 
 
 class AIService:
@@ -488,6 +489,7 @@ class AIService:
         correct_answer: Optional[str] = None,
         subject: str = "",
         image_url: Optional[str] = None,
+        openid: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         错题分析（流式，返回纯文本）
@@ -514,8 +516,38 @@ class AIService:
 {("【学科】" + str(subject)) if subject else ""}"""
 
         # 如果有图片，使用视觉模型
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # 确定模型类型：有图片用 multimodal，否则用 text
+        model_type = "multimodal" if image_url else "text"
+        
+        # 优先使用用户配置的模型
+        config = None
+        if openid:
+            try:
+                user_model = await ModelConfigService.get_model_for_type(openid, model_type)
+                if user_model.get("api_key"):
+                    config = {
+                        "base_url": user_model["base_url"],
+                        "api_key": user_model["api_key"],
+                        "model": user_model["model"],
+                    }
+                    logger.info(f"[AIService] 错题分析使用用户配置: platform={user_model.get('platform')}, model={user_model.get('model')}")
+            except Exception as e:
+                logger.warning(f"[AIService] 获取用户模型配置失败: {e}")
+        
+        # 如果用户未配置或配置无效，回退到系统默认
+        if not config:
+            fallback_type = "vision" if image_url else "text"
+            fallback_config = AI_MODELS.get(fallback_type, AI_MODELS["text"])
+            if not fallback_config.get("api_key"):
+                raise ValueError("请先在「个人中心 → 模型配置」中配置 AI 模型的 API Key")
+            config = fallback_config
+            logger.info(f"[AIService] 错题分析使用系统默认: model={config.get('model')}")
+        
+        # 构建消息
         if image_url:
-            config = AI_MODELS["vision"]
             messages = [
                 {
                     "role": "user",
@@ -526,7 +558,6 @@ class AIService:
                 }
             ]
         else:
-            config = AI_MODELS["text"]
             messages = [{"role": "user", "content": prompt}]
 
         async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:

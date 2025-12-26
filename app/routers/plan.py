@@ -30,6 +30,7 @@ from ..models import (
 )
 from ..services.ai_service import AIService
 from ..services.plan_service import PlanService
+from ..services.model_config_service import ModelConfigService
 
 router = APIRouter(prefix="/api/plan", tags=["学习计划"])
 
@@ -1622,14 +1623,27 @@ async def analyze_mistake(request: AnalyzeMistakeRequest):
 
 
 @router.post("/analyze-mistake/stream")
-async def analyze_mistake_stream(request: AnalyzeMistakeRequest):
+async def analyze_mistake_stream(request: AnalyzeMistakeRequest, raw_request: Request):
     """
     错题分析（流式响应 SSE）
 
     返回格式：
     - data: {"content": "..."}  (多次)
     - data: [DONE]
+    
+    注：用户身份通过 X-WX-OPENID 请求头获取（云托管自动注入）
     """
+    # 从请求头获取 openid
+    openid = (
+        raw_request.headers.get("x-wx-openid")
+        or raw_request.headers.get("X-WX-OPENID")
+    )
+    if not openid:
+        raise HTTPException(
+            status_code=401,
+            detail="缺少用户身份（X-WX-OPENID），请使用 wx.cloud.callContainer 内网调用",
+        )
+    
     try:
         async def generate():
             try:
@@ -1639,6 +1653,7 @@ async def analyze_mistake_stream(request: AnalyzeMistakeRequest):
                     correct_answer=request.correct_answer,
                     subject=request.subject,
                     image_url=request.image_url,
+                    openid=openid,  # 传递 openid 以获取用户模型配置
                 ):
                     yield f"data: {json.dumps({'content': chunk})}\n\n"
                 yield "data: [DONE]\n\n"
