@@ -13,6 +13,7 @@ import json
 
 from ...config import settings
 from ...db.wxcloud import MistakeRepository, get_db
+from ...services.model_config_service import ModelConfigService
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
@@ -20,6 +21,34 @@ if TYPE_CHECKING:
 # 配置日志
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+
+async def _get_text_llm(user_id: str = None, temperature: float = 0.7):
+    """
+    获取文本模型 LLM 实例
+    
+    优先使用用户配置的文本模型，否则使用系统默认配置
+    """
+    if user_id:
+        try:
+            model_config = await ModelConfigService.get_model_for_type(user_id, "text")
+            if model_config.get("api_key"):
+                return ChatOpenAI(
+                    model=model_config["model"],
+                    api_key=model_config["api_key"],
+                    base_url=model_config["base_url"],
+                    temperature=temperature,
+                )
+        except Exception as e:
+            logger.warning(f"[mistakes] 获取用户模型配置失败: {e}")
+    
+    # 降级：使用系统默认配置（需要用户在小程序中配置）
+    return ChatOpenAI(
+        model=settings.DEEPSEEK_MODEL,
+        api_key="",  # 需要用户配置
+        base_url=settings.DEEPSEEK_API_BASE,
+        temperature=temperature,
+    )
 
 def _normalize_tags(tags: List[str]) -> List[str]:
     out: List[str] = []
@@ -42,17 +71,12 @@ def _normalize_tags(tags: List[str]) -> List[str]:
     return uniq[:8]
 
 
-async def _ai_generate_tags(question: str, user_answer: str = "", correct_answer: str = "", analysis: str = "") -> List[str]:
+async def _ai_generate_tags(question: str, user_answer: str = "", correct_answer: str = "", analysis: str = "", user_id: str = None) -> List[str]:
     """
     用 LLM 为错题生成标签（不预置）。
     返回短标签列表（3~6 个，最多 8 个）。
     """
-    llm = ChatOpenAI(
-        model=settings.DEEPSEEK_MODEL,
-        api_key=settings.DEEPSEEK_API_KEY,
-        base_url=settings.DEEPSEEK_API_BASE,
-        temperature=0.2,
-    )
+    llm = await _get_text_llm(user_id, temperature=0.2)
 
     prompt = f"""请为下面这道错题生成标签（tags）。
 要求：
@@ -213,6 +237,7 @@ def create_add_mistake_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
                 user_answer=user_answer or "",
                 correct_answer=correct_answer or "",
                 analysis=analysis or "",
+                user_id=user_id,
             )
 
             data = {
@@ -287,12 +312,7 @@ def create_generate_review_tool(user_id: str, memory: "AgentMemory") -> BaseTool
 需要我帮你搜索相关练习题吗？"""
             
             # 使用 LLM 生成复习建议
-            llm = ChatOpenAI(
-                model=settings.DEEPSEEK_MODEL,
-                api_key=settings.DEEPSEEK_API_KEY,
-                base_url=settings.DEEPSEEK_API_BASE,
-                temperature=0.7,
-            )
+            llm = await _get_text_llm(user_id, temperature=0.7)
             
             # 构建错题摘要
             mistakes_summary = "\n".join([

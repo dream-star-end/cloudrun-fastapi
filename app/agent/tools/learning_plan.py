@@ -14,9 +14,38 @@ from langchain_core.tools import tool, BaseTool
 from langchain_openai import ChatOpenAI
 
 from ...config import settings
+from ...services.model_config_service import ModelConfigService
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
+
+
+async def _get_text_llm(user_id: str = None, temperature: float = 0.7):
+    """
+    获取文本模型 LLM 实例
+    
+    优先使用用户配置的文本模型，否则使用系统默认配置
+    """
+    if user_id:
+        try:
+            model_config = await ModelConfigService.get_model_for_type(user_id, "text")
+            if model_config.get("api_key"):
+                return ChatOpenAI(
+                    model=model_config["model"],
+                    api_key=model_config["api_key"],
+                    base_url=model_config["base_url"],
+                    temperature=temperature,
+                )
+        except Exception:
+            pass
+    
+    # 降级：使用系统默认配置（需要用户在小程序中配置）
+    return ChatOpenAI(
+        model=settings.DEEPSEEK_MODEL,
+        api_key="",  # 需要用户配置
+        base_url=settings.DEEPSEEK_API_BASE,
+        temperature=temperature,
+    )
 
 
 def create_learning_plan_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
@@ -49,12 +78,7 @@ def create_learning_plan_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
         Returns:
             包含学习计划的JSON格式字符串
         """
-        llm = ChatOpenAI(
-            model=settings.DEEPSEEK_MODEL,
-            api_key=settings.DEEPSEEK_API_KEY,
-            base_url=settings.DEEPSEEK_API_BASE,
-            temperature=0.7,
-        )
+        llm = await _get_text_llm(user_id, temperature=0.7)
         
         # 获取用户画像以个性化计划
         user_profile = ""
@@ -152,12 +176,7 @@ def generate_daily_tasks_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
         Returns:
             今日学习任务列表
         """
-        llm = ChatOpenAI(
-            model=settings.DEEPSEEK_MODEL,
-            api_key=settings.DEEPSEEK_API_KEY,
-            base_url=settings.DEEPSEEK_API_BASE,
-            temperature=0.7,
-        )
+        llm = await _get_text_llm(user_id, temperature=0.7)
         
         # 获取用户画像
         user_profile = ""

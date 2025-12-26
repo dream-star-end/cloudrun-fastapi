@@ -224,7 +224,10 @@ class LearningAgent:
         platform = model_config.get("platform", "deepseek")
         model = model_config.get("model", "deepseek-chat")
         base_url = model_config.get("base_url", settings.DEEPSEEK_API_BASE)
-        api_key = model_config.get("api_key", settings.DEEPSEEK_API_KEY)
+        api_key = model_config.get("api_key", "")  # API Key 必须从用户配置获取
+        
+        if not api_key:
+            logger.warning(f"[LearningAgent] API Key 未配置: platform={platform}, model={model}")
         
         logger.info(f"[LearningAgent] 创建 LLM: platform={platform}, model={model}")
         
@@ -298,13 +301,13 @@ class LearningAgent:
             }
             
         except Exception as e:
-            logger.error(f"[LearningAgent] 获取模型配置失败，使用系统默认: {e}")
-            # 降级到系统默认配置
+            logger.error(f"[LearningAgent] 获取模型配置失败: {e}")
+            # 降级到系统默认配置（无 API Key，会在调用时失败）
             model_config = {
                 "platform": "deepseek",
                 "model": settings.DEEPSEEK_MODEL,
                 "base_url": settings.DEEPSEEK_API_BASE,
-                "api_key": settings.DEEPSEEK_API_KEY,
+                "api_key": "",  # 无法获取用户配置时，API Key 为空
                 "is_user_config": False,
             }
             self._current_model_info = {

@@ -96,13 +96,31 @@ class OpenAISTTDispatcher(ModelDispatcher):
         # Step 2: 用转录文本替换消息中的语音内容，调用文本模型
         text_messages = MessageConverter.build_text_messages_from_transcription(messages, transcribed_text)
         
-        # 获取文本模型配置（使用默认的 DeepSeek）
-        text_config = {
-            "platform": "deepseek",
-            "model": "deepseek-chat",
-            "base_url": "https://api.deepseek.com/v1",
-            "api_key": settings.DEEPSEEK_API_KEY,
-        }
+        # 获取文本模型配置
+        # 注意：这里需要从用户配置获取，但 STT 分发器没有 openid 上下文
+        # 暂时使用系统默认配置（无 API Key），调用方需要确保传入有效配置
+        from ..model_config_service import ModelConfigService
+        
+        # 尝试从用户配置获取文本模型
+        if openid:
+            try:
+                text_config = await ModelConfigService.get_model_for_type(openid, "text")
+                logger.info(f"[OpenAISTTDispatcher] 使用用户配置的文本模型: {text_config.get('model')}")
+            except Exception as e:
+                logger.warning(f"[OpenAISTTDispatcher] 获取用户配置失败，使用默认配置: {e}")
+                text_config = {
+                    "platform": "deepseek",
+                    "model": "deepseek-chat",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "",  # 需要用户配置
+                }
+        else:
+            text_config = {
+                "platform": "deepseek",
+                "model": "deepseek-chat",
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": "",  # 需要用户配置
+            }
         
         logger.info(f"[OpenAISTTDispatcher] 调用文本模型: {text_config['model']}")
         

@@ -8,9 +8,38 @@ from langchain_core.tools import tool, BaseTool
 from langchain_openai import ChatOpenAI
 
 from ...config import settings
+from ...services.model_config_service import ModelConfigService
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
+
+
+async def _get_text_llm(user_id: str = None, temperature: float = 0.7):
+    """
+    获取文本模型 LLM 实例
+    
+    优先使用用户配置的文本模型，否则使用系统默认配置
+    """
+    if user_id:
+        try:
+            model_config = await ModelConfigService.get_model_for_type(user_id, "text")
+            if model_config.get("api_key"):
+                return ChatOpenAI(
+                    model=model_config["model"],
+                    api_key=model_config["api_key"],
+                    base_url=model_config["base_url"],
+                    temperature=temperature,
+                )
+        except Exception:
+            pass
+    
+    # 降级：使用系统默认配置（需要用户在小程序中配置）
+    return ChatOpenAI(
+        model=settings.DEEPSEEK_MODEL,
+        api_key="",  # 需要用户配置
+        base_url=settings.DEEPSEEK_API_BASE,
+        temperature=temperature,
+    )
 
 
 @tool
@@ -36,12 +65,9 @@ async def analyze_mistake(
     Returns:
         详细的错题分析报告
     """
-    llm = ChatOpenAI(
-        model=settings.DEEPSEEK_MODEL,
-        api_key=settings.DEEPSEEK_API_KEY,
-        base_url=settings.DEEPSEEK_API_BASE,
-        temperature=0.5,
-    )
+    # 注意：此工具作为独立函数调用，无法获取 user_id
+    # 使用系统默认配置（需要用户在小程序中配置模型）
+    llm = await _get_text_llm(None, temperature=0.5)
     
     prompt = f"""作为学习分析专家，请分析这道错题：
 
@@ -97,12 +123,7 @@ def create_analyze_learning_status_tool(user_id: str, memory: "AgentMemory") -> 
         if memory:
             profile = memory.get_user_profile()
         
-        llm = ChatOpenAI(
-            model=settings.DEEPSEEK_MODEL,
-            api_key=settings.DEEPSEEK_API_KEY,
-            base_url=settings.DEEPSEEK_API_BASE,
-            temperature=0.7,
-        )
+        llm = await _get_text_llm(user_id, temperature=0.7)
         
         prompt = f"""作为学习分析师，请根据用户画像分析学习状态：
 

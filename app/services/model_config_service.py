@@ -201,15 +201,14 @@ class ModelConfigService:
         logger.info(f"[ModelConfigService] 使用系统默认: type={model_type}")
         system_default = cls.DEFAULT_CONFIG.get(model_type, cls.DEFAULT_CONFIG["text"])
         
-        # 从环境变量获取系统默认的 API Key
-        from ..config import settings
-        
+        # 系统默认配置不包含 API Key，需要用户自行配置
+        # 返回空 api_key，让调用方处理（如显示配置提示）
         return {
             "platform": system_default["platform"],
             "model": system_default["model"],
             "model_name": system_default["model"],
             "base_url": system_default["base_url"],
-            "api_key": settings.DEEPSEEK_API_KEY,
+            "api_key": "",  # 系统默认不提供 API Key，需要用户配置
             "is_user_config": False,
         }
     

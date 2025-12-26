@@ -19,8 +19,7 @@ class Settings(BaseSettings):
     APP_VERSION: str = "2.0.0"  # 升级到 Agent 版本
     DEBUG: bool = False
     
-    # DeepSeek AI 配置（文本模型）
-    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+    # DeepSeek AI 配置（默认模型配置，API Key 从用户配置读取）
     DEEPSEEK_API_BASE: str = "https://api.deepseek.com/v1"  # LangChain 使用 api_base
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
     DEEPSEEK_MODEL: str = "deepseek-chat"
@@ -28,8 +27,7 @@ class Settings(BaseSettings):
     # DeepSeek 视觉模型
     DEEPSEEK_VISION_MODEL: str = "deepseek-chat"  # DeepSeek 视觉模型
     
-    # 视觉模型配置（备用）
-    VISION_API_KEY: str = os.getenv("VISION_API_KEY", "")
+    # 视觉模型配置（默认配置，API Key 从用户配置读取）
     VISION_BASE_URL: str = "https://api.gptsapi.net/v1"
     VISION_MODEL: str = "gpt-4o"
     
@@ -98,7 +96,6 @@ else:
     logger.info("[Config] WX_API_TOKEN: 未配置/未注入")
 if getattr(settings, "WX_API_TOKEN_EXPIRETIME", ""):
     logger.info(f"[Config] WX_API_TOKEN_EXPIRETIME: {settings.WX_API_TOKEN_EXPIRETIME}")
-logger.info(f"[Config] DEEPSEEK_API_KEY: {'已配置' if settings.DEEPSEEK_API_KEY else '未配置'}")
 logger.info("=" * 60)
 
 
@@ -128,22 +125,20 @@ def get_http_client_kwargs(timeout: float = 30.0) -> dict:
     return kwargs
 
 
-# AI 模型配置字典
+# AI 模型配置字典（已废弃，API Key 现在从用户数据库配置读取）
+# 保留此字典仅用于向后兼容，实际使用 ModelConfigService
 AI_MODELS = {
     "text": {
-        "api_key": settings.DEEPSEEK_API_KEY,
         "base_url": settings.DEEPSEEK_BASE_URL,
         "model": settings.DEEPSEEK_MODEL,
         "max_tokens": 4000,
     },
     "vision": {
-        "api_key": settings.VISION_API_KEY,
         "base_url": settings.VISION_BASE_URL,
         "model": settings.VISION_MODEL,
         "max_tokens": 4000,
     },
     "longtext": {
-        "api_key": settings.DEEPSEEK_API_KEY,
         "base_url": settings.DEEPSEEK_BASE_URL,
         "model": settings.DEEPSEEK_MODEL,
         "max_tokens": 8000,

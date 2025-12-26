@@ -1,12 +1,44 @@
 """
 图片识别工具
 基于 LangChain 1.0 的 @tool 装饰器
+
+注意：此工具需要用户配置支持视觉的模型（如 GPT-4o）
+DeepSeek 不支持图片识别
 """
 
 from langchain_core.tools import tool, BaseTool
 from langchain_openai import ChatOpenAI
 
 from ...config import settings
+from ...services.model_config_service import ModelConfigService
+
+
+async def _get_vision_llm(user_id: str = None):
+    """
+    获取视觉模型 LLM 实例
+    
+    优先使用用户配置的多模态模型，否则使用系统默认配置
+    """
+    if user_id:
+        try:
+            model_config = await ModelConfigService.get_model_for_type(user_id, "multimodal")
+            if model_config.get("api_key"):
+                return ChatOpenAI(
+                    model=model_config["model"],
+                    api_key=model_config["api_key"],
+                    base_url=model_config["base_url"],
+                    temperature=0.3,
+                )
+        except Exception:
+            pass
+    
+    # 降级：使用系统默认视觉模型配置（需要用户在小程序中配置）
+    return ChatOpenAI(
+        model=settings.VISION_MODEL,
+        api_key="",  # 需要用户配置
+        base_url=settings.VISION_BASE_URL,
+        temperature=0.3,
+    )
 
 
 @tool
@@ -67,23 +99,9 @@ async def recognize_image(
     prompt = custom_prompt if custom_prompt else prompts.get(recognize_type, prompts["auto"])
     
     try:
-        # 使用视觉模型（GPT-4o 支持图片识别，DeepSeek 不支持）
-        # 优先使用 VISION 配置，如果没有配置则降级到 DeepSeek（会失败）
-        if settings.VISION_API_KEY:
-            llm = ChatOpenAI(
-                model=settings.VISION_MODEL,
-                api_key=settings.VISION_API_KEY,
-                base_url=settings.VISION_BASE_URL,
-                temperature=0.3,
-            )
-        else:
-            # 降级到 DeepSeek（注意：DeepSeek 不支持图片，会失败）
-            llm = ChatOpenAI(
-                model=settings.DEEPSEEK_VISION_MODEL,
-                api_key=settings.DEEPSEEK_API_KEY,
-                base_url=settings.DEEPSEEK_API_BASE,
-                temperature=0.3,
-            )
+        # 使用视觉模型（需要用户配置支持视觉的模型，如 GPT-4o）
+        # 注意：DeepSeek 不支持图片识别
+        llm = await _get_vision_llm()
         
         messages = [
             {
