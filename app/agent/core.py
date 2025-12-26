@@ -513,24 +513,53 @@ class LearningAgent:
                 # 判断使用哪种 API 模式
                 # qwen-omni 模型虽然支持音频输入，但用于转录时应使用 STT API（paraformer）
                 # Chat API 适用于需要对话能力的场景，纯转录用 STT 更高效
-                is_qwen_omni = any(pattern in model.lower() for pattern in ["qwen-omni", "qwen2.5-omni", "qwen3-omni", "qwen-audio"])
+                model_lower = model.lower()
+                is_qwen_omni = any(pattern in model_lower for pattern in ["qwen-omni", "qwen2.5-omni", "qwen3-omni", "qwen-audio"])
+                is_qwen_platform = platform == "qwen" or platform.startswith("qwen")
+                
+                logger.info(f"[LearningAgent] 语音转录路由判断: model={model}, platform={platform}, is_qwen_omni={is_qwen_omni}, is_qwen_platform={is_qwen_platform}")
+                
+                # 获取用户配置的 API 格式
+                api_format = voice_config.get("api_format", "openai")
                 
                 # qwen 平台（包括 omni 模型）使用 STT API
                 # 其他多模态模型使用 Chat API
                 use_chat_api = (
                     not is_qwen_omni and  # qwen-omni 用 STT API
-                    platform != "qwen" and  # qwen 平台用 STT API
+                    not is_qwen_platform and  # qwen 平台用 STT API
                     (
                         platform.startswith("custom_") or
                         "openrouter" in base_url.lower() or
-                        "gemini" in model.lower() or
-                        "claude" in model.lower() or
-                        "gpt-4" in model.lower()
+                        "gemini" in model_lower or
+                        "claude" in model_lower or
+                        "gpt-4" in model_lower
                     )
                 )
                 
-                if use_chat_api:
-                    # 使用 Chat Completions API（多模态模型）
+                # 检测是否使用原生 Gemini API 格式
+                # 优先使用用户配置的 api_format，其次根据 URL 和模型名推断
+                is_gemini_native = (
+                    api_format == "gemini" or  # 用户明确配置为 Gemini 格式
+                    (
+                        "gemini" in model_lower and
+                        (
+                            "generativelanguage.googleapis.com" in base_url.lower() or
+                            # 自定义中转 API 通常不包含 openrouter，且模型名包含 gemini
+                            (platform.startswith("custom_") and "openrouter" not in base_url.lower() and api_format != "openai")
+                        )
+                    )
+                )
+                
+                logger.info(f"[LearningAgent] 语音转录路由结果: use_chat_api={use_chat_api}, is_gemini_native={is_gemini_native}, api_format={api_format}")
+                
+                if is_gemini_native:
+                    # 使用原生 Gemini API 格式（inline_data）
+                    return await self._transcribe_via_gemini_native_api(
+                        client, audio_data, audio_format, mime_type,
+                        base_url, api_key, model
+                    )
+                elif use_chat_api:
+                    # 使用 Chat Completions API（OpenRouter 等 OpenAI 兼容格式）
                     return await self._transcribe_via_chat_api(
                         client, audio_data, audio_format, mime_type,
                         base_url, api_key, model
@@ -587,6 +616,104 @@ class LearningAgent:
             
             return audio_base64, audio_format
     
+    async def _transcribe_via_gemini_native_api(
+        self,
+        client,
+        audio_data: bytes,
+        audio_format: str,
+        mime_type: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+    ) -> str:
+        """
+        通过原生 Gemini API 格式转录语音
+        
+        使用 /v1beta/models/{model}:generateContent 端点
+        音频以 base64 编码通过 inline_data 传递
+        
+        请求格式：
+        {
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    {"text": "请转录这段音频"},
+                    {"inline_data": {"mime_type": "audio/mp3", "data": "base64..."}}
+                ]
+            }]
+        }
+        """
+        import base64
+        
+        # Base64 编码音频
+        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+        
+        logger.info(f"[LearningAgent] 使用原生 Gemini API 转录，音频大小: {len(audio_data)} bytes, 格式: {audio_format}")
+        
+        # 构建请求 URL
+        # 原生 Gemini API: /v1beta/models/{model}:generateContent?key={api_key}
+        # 中转 API 可能是: {base_url}/v1beta/models/{model}:generateContent?key={api_key}
+        base_url_clean = base_url.rstrip('/')
+        
+        # 移除可能存在的 /v1 后缀（用户可能配置了 OpenAI 兼容格式的 base_url）
+        if base_url_clean.endswith('/v1'):
+            base_url_clean = base_url_clean[:-3]
+        
+        gemini_url = f"{base_url_clean}/v1beta/models/{model}:generateContent?key={api_key}"
+        
+        headers = {
+            "Content-Type": "application/json",
+        }
+        
+        # 构建原生 Gemini 格式的请求体
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": "请将这段音频转录为文字，只输出转录的文字内容，不要添加任何解释或额外内容。"
+                        },
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": audio_base64
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        logger.info(f"[LearningAgent] Gemini Native API URL: {gemini_url[:80]}...")
+        
+        response = await client.post(
+            gemini_url,
+            headers=headers,
+            json=payload,
+            timeout=90.0,
+        )
+        
+        if response.status_code != 200:
+            error_text = response.text[:300] if response.text else "未知错误"
+            logger.error(f"[LearningAgent] Gemini Native API 转录失败: {response.status_code} - {error_text}")
+            raise ValueError(f"语音转文本失败: {error_text}")
+        
+        result = response.json()
+        
+        # 提取转录文本（原生 Gemini 响应格式）
+        # 响应格式: {"candidates": [{"content": {"parts": [{"text": "..."}]}}]}
+        candidates = result.get("candidates", [])
+        if candidates:
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            if parts:
+                text = parts[0].get("text", "")
+                logger.info(f"[LearningAgent] Gemini Native API 转录成功: {text[:50]}...")
+                return text.strip()
+        
+        raise ValueError("语音转文本失败: Gemini 响应中没有内容")
+
     async def _transcribe_via_chat_api(
         self,
         client,

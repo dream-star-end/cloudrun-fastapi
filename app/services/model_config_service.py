@@ -162,8 +162,9 @@ class ModelConfigService:
             model_type: 模型类型 (text/voice/multimodal/vision)
             
         Returns:
-            模型配置字典，包含 platform, model, base_url, api_key, model_types 等
+            模型配置字典，包含 platform, model, base_url, api_key, model_types, api_format 等
             model_types: 模型支持的输入类型列表，如 ["text", "voice"]
+            api_format: API 格式，openai 或 gemini
         """
         # vision 和 multimodal 统一处理
         if model_type == "vision":
@@ -190,7 +191,7 @@ class ModelConfigService:
             )
             
             if platform_config and platform_config.get("apiKey"):
-                logger.info(f"[ModelConfigService] 使用用户配置: type={model_type}, platform={config_id}, model={model_id}, model_types={model_types}")
+                logger.info(f"[ModelConfigService] 使用用户配置: type={model_type}, platform={config_id}, model={model_id}, model_types={model_types}, api_format={platform_config.get('apiFormat', 'openai')}")
                 return {
                     "platform": config_id,
                     "model": model_id or model_name,
@@ -199,6 +200,7 @@ class ModelConfigService:
                     "api_key": platform_config["apiKey"],
                     "is_user_config": True,
                     "model_types": model_types,  # 模型支持的输入类型
+                    "api_format": platform_config.get("apiFormat", "openai"),  # API 格式
                 }
         
         # 用户未配置或配置无效，使用系统默认
@@ -215,6 +217,7 @@ class ModelConfigService:
             "api_key": "",  # 系统默认不提供 API Key，需要用户配置
             "is_user_config": False,
             "model_types": ["text"],  # 系统默认只支持文本
+            "api_format": "openai",  # 系统默认使用 OpenAI 格式
         }
     
     @classmethod
@@ -288,7 +291,7 @@ class ModelConfigService:
             custom_platforms: 自定义平台列表
             
         Returns:
-            平台配置字典，包含 apiKey, baseUrl 等
+            平台配置字典，包含 apiKey, baseUrl, apiFormat 等
         """
         # 先查找内置平台配置
         if config_id in platform_configs:
@@ -298,6 +301,7 @@ class ModelConfigService:
                     "apiKey": builtin_config["apiKey"],
                     "baseUrl": builtin_config.get("baseUrl") or cls._get_platform_base_url(config_id),
                     "enabled": builtin_config.get("enabled", True),
+                    "apiFormat": "openai",  # 内置平台默认使用 OpenAI 格式
                 }
         
         # 查找自定义平台
@@ -307,6 +311,7 @@ class ModelConfigService:
                     "apiKey": custom.get("apiKey"),
                     "baseUrl": custom.get("baseUrl"),
                     "enabled": custom.get("enabled", True),
+                    "apiFormat": custom.get("apiFormat", "openai"),  # 自定义平台可配置格式
                 }
         
         return None
