@@ -430,7 +430,8 @@ class LearningAgent:
         """
         转录语音为文本
         
-        使用 OpenAI Whisper API 进行语音转文本
+        使用用户配置的语音模型进行语音转文本（STT）
+        支持 OpenAI Whisper、通义千问等多种 STT 服务
         
         Args:
             voice_url: 语音文件 URL
@@ -444,6 +445,21 @@ class LearningAgent:
         logger.info(f"[LearningAgent] 开始转录语音: {voice_url[:50]}...")
         
         try:
+            # 获取用户配置的语音模型
+            voice_config = await ModelConfigService.get_model_for_type(
+                openid=self.user_id,
+                model_type="voice",
+            )
+            
+            api_key = voice_config.get("api_key", "")
+            platform = voice_config.get("platform", "")
+            base_url = voice_config.get("base_url", "")
+            
+            if not api_key:
+                raise ValueError("请先在「个人中心 → 模型配置」中配置语音模型的 API Key")
+            
+            logger.info(f"[LearningAgent] 使用语音模型: platform={platform}, base_url={base_url[:30]}...")
+            
             async with httpx.AsyncClient(**get_http_client_kwargs(60.0)) as client:
                 # 下载音频
                 audio_response = await client.get(voice_url, follow_redirects=True)
@@ -468,17 +484,29 @@ class LearningAgent:
                     filename = "audio.mp3"
                     mime_type = "audio/mpeg"
                 
-                # 调用 OpenAI Whisper API
-                transcription_url = "https://api.openai.com/v1/audio/transcriptions"
+                # 根据平台选择 STT API
+                if platform == "qwen":
+                    # 通义千问 Paraformer STT API
+                    transcription_url = f"{base_url}/audio/transcriptions"
+                    model = "paraformer-v2"
+                elif platform == "openai":
+                    # OpenAI Whisper API
+                    transcription_url = f"{base_url}/audio/transcriptions"
+                    model = "whisper-1"
+                else:
+                    # 默认使用 OpenAI 兼容格式
+                    transcription_url = f"{base_url}/audio/transcriptions"
+                    model = "whisper-1"
+                
                 headers = {
-                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                 }
                 
                 files = {
                     "file": (filename, audio_data, mime_type),
                 }
                 data = {
-                    "model": "whisper-1",
+                    "model": model,
                 }
                 
                 response = await client.post(
