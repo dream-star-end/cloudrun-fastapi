@@ -7,10 +7,12 @@ AI Agent 核心模块
 - 多轮对话：保持上下文连贯性
 - 自我反思：评估执行结果并优化策略
 - 流式输出：支持实时响应
+- 多模态支持：支持图片、语音输入
 """
 
 import json
-from typing import AsyncIterator, Optional, Dict, Any, List
+import logging
+from typing import AsyncIterator, Optional, Dict, Any, List, Union
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
@@ -19,6 +21,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from .tools import get_all_tools
 from .memory import AgentMemory
 from ..config import settings, IS_CLOUDRUN, DISABLE_SSL_VERIFY
+
+logger = logging.getLogger(__name__)
 
 
 # AI 学习教练系统提示词
@@ -226,29 +230,187 @@ class LearningAgent:
             checkpointer=self.checkpointer,  # 启用对话状态持久化
         )
     
+    def _build_multimodal_content(
+        self,
+        multimodal: Dict[str, Any],
+    ) -> Union[str, List[Dict[str, Any]]]:
+        """
+        构建 LangChain 多模态消息内容
+        
+        LangChain 多模态格式：
+        [
+            {"type": "text", "text": "..."},
+            {"type": "image_url", "image_url": {"url": "..."}},
+        ]
+        
+        Args:
+            multimodal: 多模态消息字典，包含 text, image_url, image_base64, voice_url, voice_text
+            
+        Returns:
+            如果只有文本，返回字符串；否则返回 LangChain 多模态内容列表
+        """
+        content = []
+        
+        # 文本部分
+        text = multimodal.get("text", "")
+        if text:
+            content.append({"type": "text", "text": text})
+        
+        # 图片部分（URL 优先）
+        image_url = multimodal.get("image_url")
+        image_base64 = multimodal.get("image_base64")
+        if image_url:
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": image_url}
+            })
+        elif image_base64:
+            # Base64 格式需要添加 data URI 前缀
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+            })
+        
+        # 语音部分（voice_text 优先，如果前端已转录）
+        voice_text = multimodal.get("voice_text")
+        voice_url = multimodal.get("voice_url")
+        
+        if voice_text:
+            # 前端已转录，直接使用转录文本
+            if not text:  # 如果没有文本，语音转录作为主要文本
+                content.append({"type": "text", "text": voice_text})
+            else:  # 如果有文本，语音转录作为补充
+                content.append({"type": "text", "text": f"[语音内容]: {voice_text}"})
+        
+        # 如果只有一个文本元素，返回纯字符串（向后兼容）
+        if len(content) == 1 and content[0]["type"] == "text":
+            return content[0]["text"]
+        
+        # 如果没有任何内容，返回空字符串
+        if not content:
+            return ""
+        
+        return content
+    
+    async def _transcribe_voice(self, voice_url: str) -> str:
+        """
+        转录语音为文本
+        
+        使用 OpenAI Whisper API 进行语音转文本
+        
+        Args:
+            voice_url: 语音文件 URL
+            
+        Returns:
+            转录后的文本
+        """
+        import httpx
+        from ..config import get_http_client_kwargs
+        
+        logger.info(f"[LearningAgent] 开始转录语音: {voice_url[:50]}...")
+        
+        try:
+            async with httpx.AsyncClient(**get_http_client_kwargs(60.0)) as client:
+                # 下载音频
+                audio_response = await client.get(voice_url, follow_redirects=True)
+                if audio_response.status_code != 200:
+                    raise ValueError(f"下载音频失败: HTTP {audio_response.status_code}")
+                
+                audio_data = audio_response.content
+                content_type = audio_response.headers.get("content-type", "")
+                
+                # 推断文件格式
+                if "mp3" in content_type or voice_url.endswith(".mp3"):
+                    filename = "audio.mp3"
+                    mime_type = "audio/mpeg"
+                elif "wav" in content_type or voice_url.endswith(".wav"):
+                    filename = "audio.wav"
+                    mime_type = "audio/wav"
+                elif "silk" in voice_url or "amr" in content_type:
+                    # 微信语音格式
+                    filename = "audio.silk"
+                    mime_type = "audio/silk"
+                else:
+                    filename = "audio.mp3"
+                    mime_type = "audio/mpeg"
+                
+                # 调用 OpenAI Whisper API
+                transcription_url = "https://api.openai.com/v1/audio/transcriptions"
+                headers = {
+                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                }
+                
+                files = {
+                    "file": (filename, audio_data, mime_type),
+                }
+                data = {
+                    "model": "whisper-1",
+                }
+                
+                response = await client.post(
+                    transcription_url,
+                    headers=headers,
+                    files=files,
+                    data=data,
+                    timeout=60.0,
+                )
+                
+                if response.status_code != 200:
+                    error_text = response.text[:200] if response.text else "未知错误"
+                    raise ValueError(f"语音转文本失败: {error_text}")
+                
+                result = response.json()
+                text = result.get("text", "")
+                
+                logger.info(f"[LearningAgent] 语音转录成功: {text[:50]}...")
+                return text
+                
+        except Exception as e:
+            logger.error(f"[LearningAgent] 语音转录失败: {e}")
+            raise
+    
     async def chat(
         self,
-        message: str,
+        message: str = None,
+        multimodal: Optional[Dict[str, Any]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
-        与 Agent 对话（非流式）
+        与 Agent 对话（非流式）- 支持多模态
         
         Args:
-            message: 用户消息
+            message: 纯文本消息（向后兼容）
+            multimodal: 多模态消息 {text, image_url, image_base64, voice_url, voice_text}
             context: 额外上下文（如当前阅读的内容）
             
         Returns:
             Agent 回复
         """
+        # 构建消息内容
+        if multimodal:
+            # 如果有语音 URL 但没有转录文本，先转录
+            if multimodal.get("voice_url") and not multimodal.get("voice_text"):
+                try:
+                    transcribed = await self._transcribe_voice(multimodal["voice_url"])
+                    multimodal["voice_text"] = transcribed
+                except Exception as e:
+                    logger.error(f"[LearningAgent] 语音转录失败，降级到文本: {e}")
+            
+            content = self._build_multimodal_content(multimodal)
+            # 用于记录的文本消息
+            text_for_log = multimodal.get("text") or multimodal.get("voice_text") or "[多模态消息]"
+        else:
+            content = message
+            text_for_log = message
+        
         # 准备输入
-        input_data = self._prepare_input(message, context)
+        input_data = self._prepare_input(text_for_log, context)
         
         # 配置线程 ID（用于多轮对话）
         config = {"configurable": {"thread_id": self.user_id}}
         
         # 构建消息列表
-        messages = [HumanMessage(content=message)]
+        messages = [HumanMessage(content=content)]
         
         # 如果有系统提示，添加上下文
         if input_data.get("user_profile"):
@@ -269,45 +431,69 @@ class LearningAgent:
                 output = last_message.content
         
         # 保存对话记录
-        await self.memory.add_message("user", message)
+        await self.memory.add_message("user", text_for_log)
         await self.memory.add_message("assistant", output)
         
         # 分析并更新用户画像
-        await self._analyze_and_evolve(message, {"output": output})
+        await self._analyze_and_evolve(text_for_log, {"output": output})
         
         return output
     
     async def chat_stream(
         self,
-        message: str,
+        message: str = None,
+        multimodal: Optional[Dict[str, Any]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """
-        与 Agent 对话（流式）
+        与 Agent 对话（流式）- 支持多模态
         
         使用 LangGraph 的 astream_events API 实现流式输出
         返回结构化的事件对象，便于前端解析展示
         
         Args:
-            message: 用户消息
+            message: 纯文本消息（向后兼容）
+            multimodal: 多模态消息 {text, image_url, image_base64, voice_url, voice_text}
             context: 额外上下文
             
         Yields:
             结构化的事件对象:
-            - type: "text" | "tool_start" | "tool_end" | "tool_error" | "thinking"
+            - type: "text" | "tool_start" | "tool_end" | "tool_error" | "thinking" | "transcription"
             - content: 文本内容
             - tool_name: 工具名称（工具事件时）
             - tool_input: 工具输入参数（tool_start 时）
             - tool_output: 工具输出结果（tool_end 时）
+            - text: 语音转录文本（transcription 事件时）
         """
+        # 构建消息内容
+        if multimodal:
+            # 如果有语音 URL 但没有转录文本，先转录
+            if multimodal.get("voice_url") and not multimodal.get("voice_text"):
+                try:
+                    transcribed = await self._transcribe_voice(multimodal["voice_url"])
+                    multimodal["voice_text"] = transcribed
+                    # 发送转录事件
+                    yield {"type": "transcription", "text": transcribed}
+                except Exception as e:
+                    logger.error(f"[LearningAgent] 语音转录失败: {e}")
+                    yield {"type": "error", "error": f"语音转录失败: {str(e)}"}
+                    return
+            
+            content = self._build_multimodal_content(multimodal)
+            # 用于记录的文本消息
+            text_for_log = multimodal.get("text") or multimodal.get("voice_text") or "[多模态消息]"
+        else:
+            content = message
+            text_for_log = message
+        
         # 准备输入
-        input_data = self._prepare_input(message, context)
+        input_data = self._prepare_input(text_for_log, context)
         
         # 配置
         config = {"configurable": {"thread_id": self.user_id}}
         
         # 构建消息
-        messages = [HumanMessage(content=message)]
+        messages = [HumanMessage(content=content)]
         if input_data.get("user_profile"):
             system_content = self._build_system_message(input_data)
             messages.insert(0, SystemMessage(content=system_content))
@@ -327,9 +513,9 @@ class LearningAgent:
             if kind == "on_chat_model_stream":
                 chunk = event.get("data", {}).get("chunk")
                 if chunk and hasattr(chunk, 'content') and chunk.content:
-                    content = chunk.content
-                    full_response += content
-                    yield {"type": "text", "content": content}
+                    content_chunk = chunk.content
+                    full_response += content_chunk
+                    yield {"type": "text", "content": content_chunk}
             
             # 处理工具调用开始
             elif kind == "on_tool_start":
@@ -400,11 +586,11 @@ class LearningAgent:
                 }
         
         # 保存对话记录
-        await self.memory.add_message("user", message)
+        await self.memory.add_message("user", text_for_log)
         await self.memory.add_message("assistant", full_response)
         
         # 异步分析并进化
-        await self._analyze_and_evolve(message, {"output": full_response})
+        await self._analyze_and_evolve(text_for_log, {"output": full_response})
     
     def _get_tool_display_info(self, tool_name: str) -> Dict[str, str]:
         """获取工具的显示信息（中文名称、描述、图标）"""

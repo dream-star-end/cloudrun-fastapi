@@ -36,11 +36,23 @@ def _get_openid_from_request(request: Request) -> str:
 
 # ==================== 请求/响应模型 ====================
 
+class MultimodalMessage(BaseModel):
+    """多模态消息内容"""
+    text: Optional[str] = Field(default=None, description="文本内容")
+    image_url: Optional[str] = Field(default=None, description="图片 URL")
+    image_base64: Optional[str] = Field(default=None, description="图片 Base64 编码")
+    voice_url: Optional[str] = Field(default=None, description="语音文件 URL")
+    voice_text: Optional[str] = Field(default=None, description="语音转文本结果（可选，前端已转录时传入）")
+
+
 class AgentChatRequest(BaseModel):
-    """Agent 对话请求"""
+    """Agent 对话请求（支持多模态）"""
     # user_id 改为可选，优先使用请求头中的 openid
     user_id: Optional[str] = Field(default=None, description="用户ID（已废弃，使用请求头中的 X-WX-OPENID）")
-    message: str = Field(description="用户消息")
+    # 兼容旧版纯文本消息
+    message: Optional[str] = Field(default=None, description="用户消息（纯文本，向后兼容）")
+    # 新版多模态消息
+    multimodal: Optional[MultimodalMessage] = Field(default=None, description="多模态消息（图片/语音/文本组合）")
     mode: str = Field(default="coach", description="Agent 模式: coach(教练)/reader(伴读)")
     context: Optional[dict] = Field(default=None, description="额外上下文（如当前阅读内容）")
 
@@ -68,12 +80,16 @@ class ClearHistoryRequest(BaseModel):
 @router.post("/chat", response_model=AgentChatResponse)
 async def agent_chat(request: AgentChatRequest, raw_request: Request):
     """
-    与 AI Agent 对话（非流式）
+    与 AI Agent 对话（非流式）- 支持多模态
     
     Agent 会根据对话内容自动：
     - 调用相关工具（创建计划、搜索资源等）
     - 更新用户画像
     - 生成个性化回复
+    
+    支持的消息类型：
+    - 纯文本：使用 message 字段（向后兼容）
+    - 多模态：使用 multimodal 字段（图片/语音/文本组合）
     
     注：用户身份通过 X-WX-OPENID 请求头获取（云托管自动注入）
     """
@@ -89,9 +105,21 @@ async def agent_chat(request: AgentChatRequest, raw_request: Request):
             memory=memory,
         )
         
-        # 对话
+        # 构建多模态参数
+        multimodal_dict = None
+        if request.multimodal:
+            multimodal_dict = {
+                "text": request.multimodal.text,
+                "image_url": request.multimodal.image_url,
+                "image_base64": request.multimodal.image_base64,
+                "voice_url": request.multimodal.voice_url,
+                "voice_text": request.multimodal.voice_text,
+            }
+        
+        # 对话（支持多模态）
         response = await agent.chat(
             message=request.message,
+            multimodal=multimodal_dict,
             context=request.context,
         )
         
@@ -126,7 +154,7 @@ def json_encode_for_sse(obj) -> str:
 @router.post("/chat/stream")
 async def agent_chat_stream(request: AgentChatRequest, raw_request: Request):
     """
-    与 AI Agent 对话（流式响应 SSE）
+    与 AI Agent 对话（流式响应 SSE）- 支持多模态
     
     实时返回 Agent 的思考过程和回复，包括工具调用通知
     
@@ -135,6 +163,11 @@ async def agent_chat_stream(request: AgentChatRequest, raw_request: Request):
     - tool_start: 工具调用开始，包含工具名称、描述、输入参数
     - tool_end: 工具调用结束，包含执行结果
     - tool_error: 工具调用出错
+    - transcription: 语音转文本结果（当输入包含语音时）
+    
+    支持的消息类型：
+    - 纯文本：使用 message 字段（向后兼容）
+    - 多模态：使用 multimodal 字段（图片/语音/文本组合）
     
     注：用户身份通过 X-WX-OPENID 请求头获取（云托管自动注入）
     """
@@ -150,10 +183,22 @@ async def agent_chat_stream(request: AgentChatRequest, raw_request: Request):
             memory=memory,
         )
         
+        # 构建多模态参数
+        multimodal_dict = None
+        if request.multimodal:
+            multimodal_dict = {
+                "text": request.multimodal.text,
+                "image_url": request.multimodal.image_url,
+                "image_base64": request.multimodal.image_base64,
+                "voice_url": request.multimodal.voice_url,
+                "voice_text": request.multimodal.voice_text,
+            }
+        
         async def generate():
             try:
                 async for event in agent.chat_stream(
                     message=request.message,
+                    multimodal=multimodal_dict,
                     context=request.context,
                 ):
                     # 使用 ensure_ascii=True 确保所有 Unicode 都转义为 \uXXXX 格式

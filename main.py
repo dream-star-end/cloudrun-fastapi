@@ -14,7 +14,6 @@ from contextlib import asynccontextmanager
 
 from app.config import settings
 from app.routers.chat import router as chat_router
-from app.routers.chat_multimodal import router as chat_multimodal_router
 from app.routers.recognize import router as recognize_router
 from app.routers.search import router as search_router
 from app.routers.plan import router as plan_router
@@ -82,12 +81,11 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(chat_router)
-app.include_router(chat_multimodal_router)  # 多模态聊天路由
 app.include_router(recognize_router)
 app.include_router(search_router)
 app.include_router(plan_router)
 app.include_router(tasks_router)
-app.include_router(agent_router)  # AI Agent 路由
+app.include_router(agent_router)  # AI Agent 路由（支持多模态）
 app.include_router(mistakes_router)  # 错题本 CRUD（替代云函数）
 app.include_router(community_router)  # 学习社区路由
 app.include_router(friends_router)  # 学友系统路由
