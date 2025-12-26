@@ -95,14 +95,36 @@ class GeminiAudioDispatcher(GeminiDispatcher):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         通过 OpenRouter 调用支持音频的模型
+        
+        OpenRouter 要求音频以 base64 格式传递，不支持 URL
         """
         base_url = config["base_url"]
         api_key = config["api_key"]
         model = config["model"]
         platform = config.get("platform", "openrouter")
         
-        # 构建包含音频的消息
-        audio_messages = MessageConverter.to_openrouter_audio_format(messages, voice_url)
+        # 下载音频并转为 base64（OpenRouter 不支持 URL，必须用 base64）
+        audio_base64 = None
+        audio_format = "mp3"
+        
+        if voice_url:
+            try:
+                audio_data, mime_type = await AudioUtils.download_audio(voice_url, timeout=30.0)
+                audio_base64 = AudioUtils.to_base64(audio_data)
+                audio_format = mime_type.split("/")[-1] if "/" in mime_type else mime_type
+                logger.info(f"[GeminiAudioDispatcher] OpenRouter 音频下载成功: {len(audio_data)} bytes, format={audio_format}")
+            except Exception as e:
+                logger.error(f"[GeminiAudioDispatcher] OpenRouter 音频下载失败: {e}")
+                # 音频下载失败，降级到纯文本
+                yield {"type": "error", "message": f"语音文件下载失败: {e}"}
+                return
+        
+        # 构建包含音频的消息（使用 base64 格式）
+        audio_messages = MessageConverter.to_openrouter_audio_format(
+            messages, 
+            audio_base64=audio_base64,
+            audio_format=audio_format
+        )
         
         # 调试日志：打印转换后的消息结构
         logger.info(f"[GeminiAudioDispatcher] 原始消息数量: {len(messages)}")
@@ -112,7 +134,9 @@ class GeminiAudioDispatcher(GeminiDispatcher):
             content = msg.get("content", "")
             if isinstance(content, list):
                 content_types = [item.get("type", "unknown") for item in content]
-                logger.info(f"[GeminiAudioDispatcher] 消息[{i}] role={role}, content_types={content_types}")
+                # 检查是否有音频数据
+                has_audio = any(item.get("type") == "input_audio" for item in content)
+                logger.info(f"[GeminiAudioDispatcher] 消息[{i}] role={role}, content_types={content_types}, has_audio={has_audio}")
             else:
                 content_preview = content[:100] if isinstance(content, str) else str(content)[:100]
                 logger.info(f"[GeminiAudioDispatcher] 消息[{i}] role={role}, content={content_preview}...")
@@ -130,7 +154,7 @@ class GeminiAudioDispatcher(GeminiDispatcher):
             "Authorization": f"Bearer {api_key}",
         }
         
-        logger.info(f"[GeminiAudioDispatcher] OpenRouter 请求: model={model}, stream={stream}")
+        logger.info(f"[GeminiAudioDispatcher] OpenRouter 请求: model={model}, stream={stream}, has_audio={audio_base64 is not None}")
         
         if stream:
             async for event in self._stream_openrouter_request(

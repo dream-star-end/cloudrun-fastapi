@@ -217,17 +217,18 @@ class MessageConverter:
     def to_openrouter_audio_format(
         cls,
         messages: List[Dict[str, Any]],
-        voice_url: str
+        audio_base64: Optional[str] = None,
+        audio_format: str = "mp3"
     ) -> List[Dict[str, Any]]:
         """
         构建 OpenRouter 音频格式消息
         
-        OpenRouter 音频格式：
+        OpenRouter 音频格式（需要 base64 数据，不支持 URL）：
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": "请听取并回复这段语音"},
-                {"type": "input_audio", "input_audio": {"url": "https://..."}}
+                {"type": "input_audio", "input_audio": {"data": "base64...", "format": "mp3"}}
             ]
         }
         
@@ -235,7 +236,8 @@ class MessageConverter:
         
         Args:
             messages: 原始消息列表
-            voice_url: 语音文件 URL
+            audio_base64: 音频的 base64 编码数据
+            audio_format: 音频格式（mp3, wav, m4a 等）
             
         Returns:
             OpenRouter 格式的消息列表
@@ -266,10 +268,14 @@ class MessageConverter:
                         {"type": "text", "text": prompt},
                     ]
                     
-                    if voice_url:
+                    if audio_base64:
+                        # OpenRouter 要求 base64 data + format，不支持 URL
                         user_content.append({
                             "type": "input_audio",
-                            "input_audio": {"url": voice_url}
+                            "input_audio": {
+                                "data": audio_base64,
+                                "format": audio_format
+                            }
                         })
                     
                     result.append({"role": "user", "content": user_content})
