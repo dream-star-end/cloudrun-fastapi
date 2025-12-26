@@ -327,7 +327,7 @@ class LearningAgent:
         
         return llm
     
-    def _create_agent(self, llm: ChatOpenAI):
+    def _create_agent(self, llm: ChatOpenAI, exclude_tools: List[str] = None):
         """
         创建 LangGraph ReAct Agent
         
@@ -340,13 +340,21 @@ class LearningAgent:
         
         Args:
             llm: ChatOpenAI 实例（根据消息类型动态选择）
+            exclude_tools: 要排除的工具名称列表（如多模态模型处理图片时排除 recognize_image）
         """
+        # 根据是否需要排除工具来选择工具列表
+        if exclude_tools:
+            tools = [t for t in self.tools if t.name not in exclude_tools]
+            logger.info(f"[LearningAgent] 排除工具: {exclude_tools}, 剩余工具数: {len(tools)}")
+        else:
+            tools = self.tools
+        
         # 使用 LangGraph 创建 ReAct Agent
         # create_react_agent 返回一个 CompiledGraph
         # 系统提示通过 _build_system_message() 动态构建并作为 SystemMessage 添加
         self.agent = create_react_agent(
             model=llm,
-            tools=self.tools,
+            tools=tools,
             checkpointer=self.checkpointer,  # 启用对话状态持久化
         )
     
@@ -536,6 +544,13 @@ class LearningAgent:
         
         logger.info(f"[LearningAgent] 多模态判断: is_multimodal_model={is_multimodal_model}, has_image={has_image}, model_info={self._current_model_info}")
         
+        # 决定是否排除 recognize_image 工具
+        # 当使用多模态模型且有图片时，模型可以直接处理图片，不需要 recognize_image 工具
+        exclude_tools = None
+        if is_multimodal_model and has_image:
+            exclude_tools = ["recognize_image"]
+            logger.info("[LearningAgent] 多模态模型直接处理图片，排除 recognize_image 工具")
+        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL 但没有转录文本，先转录
@@ -553,8 +568,8 @@ class LearningAgent:
             content = message
             text_for_log = message
         
-        # 创建/更新 Agent（使用选定的 LLM）
-        self._create_agent(llm)
+        # 创建/更新 Agent（使用选定的 LLM，并根据需要排除工具）
+        self._create_agent(llm, exclude_tools=exclude_tools)
         
         # 准备输入
         input_data = self._prepare_input(text_for_log, context)
@@ -633,6 +648,13 @@ class LearningAgent:
         
         logger.info(f"[LearningAgent] 流式多模态判断: is_multimodal_model={is_multimodal_model}, has_image={has_image}, model_info={self._current_model_info}")
         
+        # 决定是否排除 recognize_image 工具
+        # 当使用多模态模型且有图片时，模型可以直接处理图片，不需要 recognize_image 工具
+        exclude_tools = None
+        if is_multimodal_model and has_image:
+            exclude_tools = ["recognize_image"]
+            logger.info("[LearningAgent] 流式：多模态模型直接处理图片，排除 recognize_image 工具")
+        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL 但没有转录文本，先转录
@@ -654,8 +676,8 @@ class LearningAgent:
             content = message
             text_for_log = message
         
-        # 创建/更新 Agent（使用选定的 LLM）
-        self._create_agent(llm)
+        # 创建/更新 Agent（使用选定的 LLM，并根据需要排除工具）
+        self._create_agent(llm, exclude_tools=exclude_tools)
         
         # 发送模型信息事件（让前端知道使用了哪个模型）
         if self._current_model_info:

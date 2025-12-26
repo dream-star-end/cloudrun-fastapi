@@ -100,6 +100,7 @@ if TYPE_CHECKING:
 def get_all_tools(
     user_id: str,
     memory: "AgentMemory",
+    exclude_tools: List[str] = None,
 ) -> List[BaseTool]:
     """
     获取所有可用工具
@@ -109,11 +110,12 @@ def get_all_tools(
     Args:
         user_id: 用户ID
         memory: Agent 记忆实例
+        exclude_tools: 要排除的工具名称列表（用于多模态模型直接处理图片时排除 recognize_image）
         
     Returns:
-        工具列表（共27个工具）
+        工具列表（共27个工具，排除指定工具后）
     """
-    return [
+    all_tools = [
         # ==================== 学习计划工具 ====================
         create_learning_plan_tool(user_id=user_id, memory=memory),
         generate_daily_tasks_tool(user_id=user_id, memory=memory),
@@ -167,6 +169,12 @@ def get_all_tools(
         create_get_document_stats_tool(user_id=user_id, memory=memory),
         create_get_recent_documents_tool(user_id=user_id, memory=memory),
     ]
+    
+    # 如果指定了要排除的工具，过滤掉它们
+    if exclude_tools:
+        all_tools = [t for t in all_tools if t.name not in exclude_tools]
+    
+    return all_tools
 
 
 __all__ = [
