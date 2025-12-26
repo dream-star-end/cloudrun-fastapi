@@ -3,6 +3,7 @@
 基于 LangChain 1.0 的 @tool 装饰器
 """
 
+import logging
 from typing import TYPE_CHECKING
 from langchain_core.tools import tool, BaseTool
 from langchain_openai import ChatOpenAI
@@ -12,6 +13,8 @@ from ...services.model_config_service import ModelConfigService
 
 if TYPE_CHECKING:
     from ..memory import AgentMemory
+
+logger = logging.getLogger(__name__)
 
 
 async def _get_text_llm(user_id: str = None, temperature: float = 0.7):
@@ -24,16 +27,18 @@ async def _get_text_llm(user_id: str = None, temperature: float = 0.7):
         try:
             model_config = await ModelConfigService.get_model_for_type(user_id, "text")
             if model_config.get("api_key"):
+                logger.info(f"[analysis] 使用用户配置的文本模型: {model_config['model']}")
                 return ChatOpenAI(
                     model=model_config["model"],
                     api_key=model_config["api_key"],
                     base_url=model_config["base_url"],
                     temperature=temperature,
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[analysis] 获取用户文本模型配置失败: {e}")
     
     # 降级：使用系统默认配置（需要用户在小程序中配置）
+    logger.warning("[analysis] 未找到用户文本模型配置，使用空 API key（将会失败）")
     return ChatOpenAI(
         model=settings.DEEPSEEK_MODEL,
         api_key="",  # 需要用户配置
@@ -42,34 +47,42 @@ async def _get_text_llm(user_id: str = None, temperature: float = 0.7):
     )
 
 
-@tool
-async def analyze_mistake(
-    question: str,
-    user_answer: str,
-    correct_answer: str = "",
-    subject: str = "",
-    image_url: str = "",
-) -> str:
-    """分析用户的错题，找出错误原因并给出改进建议。
-    
-    当用户做错题目、不理解为什么错、或想要弄懂某道题时使用。
-    会分析错误类型、知识漏洞，并提供针对性的学习建议。
+def create_analyze_mistake_tool(user_id: str, memory: "AgentMemory") -> BaseTool:
+    """
+    创建错题分析工具的工厂函数
     
     Args:
-        question: 题目内容
-        user_answer: 用户的答案
-        correct_answer: 正确答案（如果知道）
-        subject: 学科/领域
-        image_url: 题目图片URL（如果有）
-    
-    Returns:
-        详细的错题分析报告
+        user_id: 用户ID，用于获取用户配置的模型
+        memory: Agent 记忆实例
     """
-    # 注意：此工具作为独立函数调用，无法获取 user_id
-    # 使用系统默认配置（需要用户在小程序中配置模型）
-    llm = await _get_text_llm(None, temperature=0.5)
     
-    prompt = f"""作为学习分析专家，请分析这道错题：
+    @tool
+    async def analyze_mistake(
+        question: str,
+        user_answer: str,
+        correct_answer: str = "",
+        subject: str = "",
+        image_url: str = "",
+    ) -> str:
+        """分析用户的错题，找出错误原因并给出改进建议。
+        
+        当用户做错题目、不理解为什么错、或想要弄懂某道题时使用。
+        会分析错误类型、知识漏洞，并提供针对性的学习建议。
+        
+        Args:
+            question: 题目内容
+            user_answer: 用户的答案
+            correct_answer: 正确答案（如果知道）
+            subject: 学科/领域
+            image_url: 题目图片URL（如果有）
+        
+        Returns:
+            详细的错题分析报告
+        """
+        # 通过闭包捕获 user_id，确保能获取用户配置的 API key
+        llm = await _get_text_llm(user_id, temperature=0.5)
+        
+        prompt = f"""作为学习分析专家，请分析这道错题：
 
 ## 题目信息
 - 题目: {question}
@@ -88,13 +101,16 @@ async def analyze_mistake(
 
 请用清晰的格式输出分析结果。
 """
+        
+        try:
+            response = await llm.ainvoke([{"role": "user", "content": prompt}])
+            return f"📊 错题分析：\n\n{response.content}"
+        except Exception as e:
+            error_msg = str(e)
+            if "401" in error_msg or "Unauthorized" in error_msg:
+                return "错题分析失败: API 密钥无效或未配置。请在小程序「个人中心 → 模型配置」中配置模型。"
+            return f"错题分析失败: {error_msg}"
     
-    response = await llm.ainvoke([{"role": "user", "content": prompt}])
-    return f"📊 错题分析：\n\n{response.content}"
-
-
-def analyze_mistake_tool() -> BaseTool:
-    """返回错题分析工具"""
     return analyze_mistake
 
 

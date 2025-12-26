@@ -33,11 +33,11 @@ from .search import (
 )
 
 # 图片识别
-from .recognize import recognize_image_tool
+from .recognize import create_recognize_image_tool
 
 # 分析相关
 from .analysis import (
-    analyze_mistake_tool,
+    create_analyze_mistake_tool,
     create_analyze_learning_status_tool,
 )
 
@@ -123,10 +123,10 @@ def get_all_tools(
         search_learning_materials_tool(),
         
         # ==================== 识别工具 ====================
-        recognize_image_tool(),
+        create_recognize_image_tool(user_id=user_id, memory=memory),
         
         # ==================== 分析工具 ====================
-        analyze_mistake_tool(),
+        create_analyze_mistake_tool(user_id=user_id, memory=memory),
         create_analyze_learning_status_tool(user_id=user_id, memory=memory),
         
         # ==================== 用户工具 ====================
