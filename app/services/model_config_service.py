@@ -190,17 +190,34 @@ class ModelConfigService:
                 config_id, platform_configs, custom_platforms
             )
             
-            if platform_config and platform_config.get("apiKey"):
-                logger.info(f"[ModelConfigService] 使用用户配置: type={model_type}, platform={config_id}, model={model_id}, model_types={model_types}, api_format={platform_config.get('apiFormat', 'openai')}")
+            # 优先使用平台配置中的 apiKey，如果没有则使用 default_setting 中直接存储的 apiKey
+            # （小程序在保存默认模型时会将 apiKey 直接存储在 defaults 中）
+            api_key = None
+            base_url = None
+            api_format = "openai"
+            
+            if platform_config:
+                api_key = platform_config.get("apiKey")
+                base_url = platform_config.get("baseUrl")
+                api_format = platform_config.get("apiFormat", "openai")
+            
+            # 如果平台配置中没有 apiKey，尝试从 default_setting 中获取
+            if not api_key:
+                api_key = default_setting.get("apiKey")
+            if not base_url:
+                base_url = default_setting.get("baseUrl")
+            
+            if api_key:
+                logger.info(f"[ModelConfigService] 使用用户配置: type={model_type}, platform={config_id}, model={model_id}, model_types={model_types}, api_format={api_format}")
                 return {
                     "platform": config_id,
                     "model": model_id or model_name,
                     "model_name": model_name,
-                    "base_url": platform_config.get("baseUrl") or cls._get_platform_base_url(config_id),
-                    "api_key": platform_config["apiKey"],
+                    "base_url": base_url or cls._get_platform_base_url(config_id),
+                    "api_key": api_key,
                     "is_user_config": True,
                     "model_types": model_types,  # 模型支持的输入类型
-                    "api_format": platform_config.get("apiFormat", "openai"),  # API 格式
+                    "api_format": api_format,  # API 格式
                 }
         
         # 用户未配置或配置无效，使用系统默认
@@ -250,13 +267,27 @@ class ModelConfigService:
                     config_id, platform_configs, custom_platforms
                 )
                 
-                if platform_config and platform_config.get("apiKey"):
+                # 优先使用平台配置中的 apiKey，如果没有则使用 default_setting 中直接存储的 apiKey
+                api_key = None
+                base_url = None
+                
+                if platform_config:
+                    api_key = platform_config.get("apiKey")
+                    base_url = platform_config.get("baseUrl")
+                
+                # 如果平台配置中没有，尝试从 default_setting 中获取
+                if not api_key:
+                    api_key = default_setting.get("apiKey")
+                if not base_url:
+                    base_url = default_setting.get("baseUrl")
+                
+                if api_key:
                     # 用户配置有效
                     merged_defaults[model_type] = {
                         "platform": config_id,
                         "model": default_setting.get("modelId") or default_setting.get("modelName"),
-                        "base_url": platform_config.get("baseUrl") or cls._get_platform_base_url(config_id),
-                        "api_key": platform_config["apiKey"],
+                        "base_url": base_url or cls._get_platform_base_url(config_id),
+                        "api_key": api_key,
                     }
                 else:
                     # 用户配置无效，使用系统默认
