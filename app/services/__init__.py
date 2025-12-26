@@ -3,7 +3,6 @@ from .ai_service import AIService
 from .search_service import SearchService
 from .plan_service import PlanService
 from .model_config_service import ModelConfigService
-from .model_router import ModelRouter, MessageType
 
-__all__ = ["AIService", "SearchService", "PlanService", "ModelConfigService", "ModelRouter", "MessageType"]
+__all__ = ["AIService", "SearchService", "PlanService", "ModelConfigService"]
 
