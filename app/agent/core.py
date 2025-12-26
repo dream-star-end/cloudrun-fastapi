@@ -431,7 +431,9 @@ class LearningAgent:
         转录语音为文本
         
         使用用户配置的语音模型进行语音转文本（STT）
-        支持 OpenAI Whisper、通义千问等多种 STT 服务
+        支持两种模式：
+        1. 传统 STT API（OpenAI Whisper、通义千问 Paraformer）
+        2. 多模态 Chat API（OpenRouter、Gemini 等，通过 base64 音频）
         
         Args:
             voice_url: 语音文件 URL
@@ -440,6 +442,7 @@ class LearningAgent:
             转录后的文本
         """
         import httpx
+        import base64
         from ..config import get_http_client_kwargs
         
         logger.info(f"[LearningAgent] 开始转录语音: {voice_url[:50]}...")
@@ -454,13 +457,14 @@ class LearningAgent:
             api_key = voice_config.get("api_key", "")
             platform = voice_config.get("platform", "")
             base_url = voice_config.get("base_url", "")
+            model = voice_config.get("model", "")
             
             if not api_key:
                 raise ValueError("请先在「个人中心 → 模型配置」中配置语音模型的 API Key")
             
-            logger.info(f"[LearningAgent] 使用语音模型: platform={platform}, base_url={base_url[:30]}...")
+            logger.info(f"[LearningAgent] 使用语音模型: platform={platform}, model={model}, base_url={base_url[:30]}...")
             
-            async with httpx.AsyncClient(**get_http_client_kwargs(60.0)) as client:
+            async with httpx.AsyncClient(**get_http_client_kwargs(90.0)) as client:
                 # 下载音频
                 audio_response = await client.get(voice_url, follow_redirects=True)
                 if audio_response.status_code != 200:
@@ -469,67 +473,181 @@ class LearningAgent:
                 audio_data = audio_response.content
                 content_type = audio_response.headers.get("content-type", "")
                 
-                # 推断文件格式
+                # 推断文件格式和 MIME 类型
                 if "mp3" in content_type or voice_url.endswith(".mp3"):
-                    filename = "audio.mp3"
+                    audio_format = "mp3"
                     mime_type = "audio/mpeg"
                 elif "wav" in content_type or voice_url.endswith(".wav"):
-                    filename = "audio.wav"
+                    audio_format = "wav"
                     mime_type = "audio/wav"
                 elif "silk" in voice_url or "amr" in content_type:
-                    # 微信语音格式
-                    filename = "audio.silk"
-                    mime_type = "audio/silk"
+                    # 微信语音格式 - 尝试作为 mp3 处理
+                    audio_format = "mp3"
+                    mime_type = "audio/mpeg"
                 else:
-                    filename = "audio.mp3"
+                    audio_format = "mp3"
                     mime_type = "audio/mpeg"
                 
-                # 根据平台选择 STT API
-                if platform == "qwen":
-                    # 通义千问 Paraformer STT API
-                    transcription_url = f"{base_url}/audio/transcriptions"
-                    model = "paraformer-v2"
-                elif platform == "openai":
-                    # OpenAI Whisper API
-                    transcription_url = f"{base_url}/audio/transcriptions"
-                    model = "whisper-1"
-                else:
-                    # 默认使用 OpenAI 兼容格式
-                    transcription_url = f"{base_url}/audio/transcriptions"
-                    model = "whisper-1"
-                
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                }
-                
-                files = {
-                    "file": (filename, audio_data, mime_type),
-                }
-                data = {
-                    "model": model,
-                }
-                
-                response = await client.post(
-                    transcription_url,
-                    headers=headers,
-                    files=files,
-                    data=data,
-                    timeout=60.0,
+                # 判断使用哪种 API 模式
+                # 自定义平台或包含特定关键词的平台使用 Chat Completions API
+                use_chat_api = (
+                    platform.startswith("custom_") or
+                    "openrouter" in base_url.lower() or
+                    "gemini" in model.lower() or
+                    "claude" in model.lower() or
+                    "gpt-4" in model.lower()
                 )
                 
-                if response.status_code != 200:
-                    error_text = response.text[:200] if response.text else "未知错误"
-                    raise ValueError(f"语音转文本失败: {error_text}")
-                
-                result = response.json()
-                text = result.get("text", "")
-                
-                logger.info(f"[LearningAgent] 语音转录成功: {text[:50]}...")
-                return text
+                if use_chat_api:
+                    # 使用 Chat Completions API（多模态模型）
+                    return await self._transcribe_via_chat_api(
+                        client, audio_data, audio_format, mime_type,
+                        base_url, api_key, model
+                    )
+                else:
+                    # 使用传统 STT API
+                    return await self._transcribe_via_stt_api(
+                        client, audio_data, audio_format, mime_type,
+                        base_url, api_key, platform
+                    )
                 
         except Exception as e:
             logger.error(f"[LearningAgent] 语音转录失败: {e}")
             raise
+    
+    async def _transcribe_via_chat_api(
+        self,
+        client,
+        audio_data: bytes,
+        audio_format: str,
+        mime_type: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+    ) -> str:
+        """
+        通过 Chat Completions API 转录语音（适用于 OpenRouter、Gemini 等多模态模型）
+        
+        音频以 base64 编码通过 input_audio 内容类型发送
+        """
+        import base64
+        
+        # Base64 编码音频
+        audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+        
+        logger.info(f"[LearningAgent] 使用 Chat API 转录，音频大小: {len(audio_data)} bytes, 格式: {audio_format}")
+        
+        # 构建请求
+        chat_url = f"{base_url.rstrip('/')}/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        
+        # 构建多模态消息（包含音频）
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "请将这段音频转录为文字，只输出转录的文字内容，不要添加任何解释或额外内容。"
+                        },
+                        {
+                            "type": "input_audio",
+                            "input_audio": {
+                                "data": audio_base64,
+                                "format": audio_format,
+                            }
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 2000,
+        }
+        
+        response = await client.post(
+            chat_url,
+            headers=headers,
+            json=payload,
+            timeout=90.0,
+        )
+        
+        if response.status_code != 200:
+            error_text = response.text[:300] if response.text else "未知错误"
+            logger.error(f"[LearningAgent] Chat API 转录失败: {response.status_code} - {error_text}")
+            raise ValueError(f"语音转文本失败: {error_text}")
+        
+        result = response.json()
+        
+        # 提取转录文本
+        choices = result.get("choices", [])
+        if choices:
+            message = choices[0].get("message", {})
+            text = message.get("content", "")
+            logger.info(f"[LearningAgent] Chat API 转录成功: {text[:50]}...")
+            return text.strip()
+        
+        raise ValueError("语音转文本失败: 响应中没有内容")
+    
+    async def _transcribe_via_stt_api(
+        self,
+        client,
+        audio_data: bytes,
+        audio_format: str,
+        mime_type: str,
+        base_url: str,
+        api_key: str,
+        platform: str,
+    ) -> str:
+        """
+        通过传统 STT API 转录语音（适用于 OpenAI Whisper、通义千问等）
+        """
+        logger.info(f"[LearningAgent] 使用 STT API 转录，平台: {platform}")
+        
+        # 根据平台选择 STT API
+        if platform == "qwen":
+            transcription_url = f"{base_url}/audio/transcriptions"
+            stt_model = "paraformer-v2"
+        elif platform == "openai":
+            transcription_url = f"{base_url}/audio/transcriptions"
+            stt_model = "whisper-1"
+        else:
+            transcription_url = f"{base_url}/audio/transcriptions"
+            stt_model = "whisper-1"
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+        }
+        
+        filename = f"audio.{audio_format}"
+        files = {
+            "file": (filename, audio_data, mime_type),
+        }
+        data = {
+            "model": stt_model,
+        }
+        
+        response = await client.post(
+            transcription_url,
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=60.0,
+        )
+        
+        if response.status_code != 200:
+            error_text = response.text[:200] if response.text else "未知错误"
+            raise ValueError(f"语音转文本失败: {error_text}")
+        
+        result = response.json()
+        text = result.get("text", "")
+        
+        logger.info(f"[LearningAgent] STT API 转录成功: {text[:50]}...")
+        return text
     
     async def chat(
         self,
