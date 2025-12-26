@@ -6,7 +6,6 @@ import json
 import re
 from typing import Dict, List, Optional
 from .ai_service import AIService
-from ..config import AI_MODELS
 
 
 class PlanService:
@@ -97,6 +96,7 @@ class PlanService:
         deadline: Optional[str] = None,
         current_level: str = "beginner",
         preferences: Optional[Dict] = None,
+        openid: Optional[str] = None,
     ) -> Dict:
         """
         生成学习计划
@@ -108,6 +108,7 @@ class PlanService:
             deadline: 目标截止日期
             current_level: 当前水平
             preferences: 学习偏好
+            openid: 用户 openid，用于获取用户配置的模型
         
         Returns:
             学习计划字典
@@ -134,6 +135,7 @@ class PlanService:
                     model_type="text",
                     temperature=0.7,
                     max_tokens=4000,
+                    openid=openid,
                 ),
                 timeout=50.0
             )
@@ -173,6 +175,7 @@ class PlanService:
         learning_history: Optional[Dict] = None,
         today_stats: Optional[Dict] = None,
         learning_context: Optional[Dict] = None,
+        openid: Optional[str] = None,
     ) -> List[Dict]:
         """
         生成每日学习任务（非流式）
@@ -183,6 +186,7 @@ class PlanService:
             current_phase: 当前学习阶段
             learning_history: 学习历史统计
             today_stats: 今日任务统计
+            openid: 用户 openid，用于获取用户配置的模型
         
         Returns:
             任务列表
@@ -199,6 +203,7 @@ class PlanService:
                 model_type="text",
                 temperature=0.7,
                 max_tokens=2000,
+                openid=openid,
             )
             
             # 解析 JSON 数组
@@ -223,9 +228,13 @@ class PlanService:
         learning_history: Optional[Dict] = None,
         today_stats: Optional[Dict] = None,
         learning_context: Optional[Dict] = None,
+        openid: Optional[str] = None,
     ):
         """
         生成每日学习任务（流式）
+        
+        Args:
+            openid: 用户 openid，用于获取用户配置的模型
         
         Yields:
             AI 响应内容片段
@@ -241,6 +250,7 @@ class PlanService:
             model_type="text",
             temperature=0.7,
             max_tokens=2000,
+            openid=openid,
         ):
             yield chunk
 
@@ -447,6 +457,7 @@ JSON格式如下：
         phase_goals: List[str],
         domain: str,
         duration: str,
+        openid: Optional[str] = None,
     ) -> Dict:
         """
         生成学习阶段的详细内容（使用 JSON 模式，更可靠）
@@ -456,6 +467,7 @@ JSON格式如下：
             phase_goals: 阶段目标
             domain: 学习领域
             duration: 阶段时长
+            openid: 用户 openid，用于获取用户配置的模型
         
         Returns:
             阶段详情字典
@@ -474,6 +486,7 @@ JSON格式如下：
                 temperature=0.5,  # JSON 模式用较低温度更稳定
                 max_tokens=2000,
                 timeout=180.0,
+                openid=openid,
             )
             
             logger.info(f"[PlanService] 阶段详情生成成功: {phase_name}")

@@ -67,6 +67,7 @@ async def recognize_image(request: RecognizeRequest, raw_request: Request):
             image_url=request.image_url,
             recognize_type=request.recognize_type.value,
             custom_prompt=request.custom_prompt,
+            openid=openid,
         )
         
         # 保存识别记录
@@ -117,6 +118,7 @@ async def recognize_image_stream(request: RecognizeRequest, raw_request: Request
                     image_url=request.image_url,
                     recognize_type=request.recognize_type.value,
                     custom_prompt=request.custom_prompt,
+                    openid=openid,
                 ):
                     full_result_holder["content"] += chunk
                     # SSE 格式，使用 JSON 编码（ensure_ascii=True 默认值）
@@ -172,6 +174,7 @@ async def analyze_mistake_image(
         question = await AIService.recognize_image(
             image_url=image_url,
             recognize_type="ocr",
+            openid=openid,
         )
         
         # 再进行错题分析
@@ -180,6 +183,7 @@ async def analyze_mistake_image(
             user_answer=user_answer,
             subject=subject,
             image_url=image_url,
+            openid=openid,
         )
         
         # 保存识别记录

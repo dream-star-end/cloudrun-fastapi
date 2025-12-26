@@ -166,7 +166,20 @@ def _normalize_mistake_for_ui(m: Dict[str, Any]) -> Dict[str, Any]:
     return nm
 
 
-async def _ai_generate_tags(question: str, user_answer: str, correct_answer: str, analysis: str) -> List[str]:
+async def _ai_generate_tags(question: str, user_answer: str, correct_answer: str, analysis: str, openid: Optional[str] = None) -> List[str]:
+    """
+    使用 AI 自动生成错题标签
+    
+    Args:
+        question: 题目内容
+        user_answer: 用户答案
+        correct_answer: 正确答案
+        analysis: 补充说明
+        openid: 用户 openid，用于获取用户配置的模型
+    
+    Returns:
+        标签列表
+    """
     prompt = (
         "你是学习教练助手。请为下面这道错题生成标签（tags）。\n"
         "要求：\n"
@@ -180,12 +193,22 @@ async def _ai_generate_tags(question: str, user_answer: str, correct_answer: str
         f"补充说明：{analysis or ''}"
     )
 
-    # 复用 AIService 的模型配置（text）
-    # 这里不新增复杂的 service 抽象：直接按现有配置调用即可
-    from ..config import AI_MODELS, get_http_client_kwargs
+    from ..config import get_http_client_kwargs
+    from ..services.model_config_service import ModelConfigService
     import httpx
 
-    mcfg = AI_MODELS["text"]
+    # 优先使用用户配置的模型
+    mcfg = None
+    if openid:
+        try:
+            mcfg = await ModelConfigService.get_model_for_type(openid, "text")
+        except Exception:
+            pass
+
+    # 如果用户没有配置，返回空标签（不报错，静默失败）
+    if not mcfg or not mcfg.get("api_key"):
+        return []
+
     async with httpx.AsyncClient(**get_http_client_kwargs(60.0)) as client:
         resp = await client.post(
             f"{mcfg['base_url']}/chat/completions",
@@ -373,7 +396,7 @@ async def add_mistake(request: Request):
 
     # AI 自动打标签（失败不影响主流程）
     try:
-        ai_tags = await _ai_generate_tags(question, str(user_answer or ""), str(correct_answer or ""), str(analysis or ""))
+        ai_tags = await _ai_generate_tags(question, str(user_answer or ""), str(correct_answer or ""), str(analysis or ""), openid=openid)
         merged = _normalize_tags([*(tags_manual or []), *(ai_tags or [])])
         if merged:
             db = get_db()

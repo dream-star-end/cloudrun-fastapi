@@ -12,6 +12,46 @@ from .model_config_service import ModelConfigService
 class AIService:
     """AI 服务类"""
     
+    @classmethod
+    async def _get_model_config(
+        cls,
+        openid: Optional[str],
+        model_type: str,
+    ) -> Dict:
+        """
+        获取模型配置的统一方法
+        
+        Args:
+            openid: 用户 openid，为 None 时抛出错误
+            model_type: 模型类型 (text/multimodal/vision)
+        
+        Returns:
+            包含 base_url, api_key, model 的配置字典
+        
+        Raises:
+            ValueError: 当配置无效或缺少 API Key 时
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        if not openid:
+            raise ValueError("请先在「个人中心 → 模型配置」中配置 AI 模型的 API Key")
+        
+        try:
+            user_model = await ModelConfigService.get_model_for_type(openid, model_type)
+            if user_model.get("api_key"):
+                logger.info(f"[AIService] 使用用户配置: openid={openid[:8]}***, type={model_type}, platform={user_model.get('platform')}, model={user_model.get('model')}")
+                return {
+                    "base_url": user_model["base_url"],
+                    "api_key": user_model["api_key"],
+                    "model": user_model["model"],
+                }
+        except Exception as e:
+            logger.warning(f"[AIService] 获取用户模型配置失败: {e}")
+        
+        # 用户未配置或配置无效
+        raise ValueError("请先在「个人中心 → 模型配置」中配置 AI 模型的 API Key")
+    
     # 学习教练系统提示词
     COACH_SYSTEM_PROMPT = """你是一位专业、耐心、有爱心的AI学习教练。你的目标是帮助学生高效学习、解答疑惑、制定计划、监督进度。
 
@@ -48,6 +88,7 @@ class AIService:
         temperature: float = 0.7,
         max_tokens: int = 2000,
         user_memory: Optional[Dict] = None,
+        openid: Optional[str] = None,
     ) -> str:
         """
         非流式 AI 对话
@@ -58,6 +99,7 @@ class AIService:
             temperature: 生成温度
             max_tokens: 最大生成长度
             user_memory: 用户记忆/画像
+            openid: 用户 openid，用于获取用户配置的模型
         
         Returns:
             AI 回复内容
@@ -65,12 +107,8 @@ class AIService:
         import logging
         logger = logging.getLogger(__name__)
         
-        config = AI_MODELS.get(model_type, AI_MODELS["text"])
-        
-        # 检查 API Key 配置
-        if not config.get('api_key'):
-            logger.error(f"[AIService] {model_type} 模型 API Key 未配置")
-            raise ValueError(f"AI 服务配置错误：{model_type} 模型 API Key 未设置")
+        # 获取用户配置的模型
+        config = await cls._get_model_config(openid, model_type)
         
         # 构建完整的消息列表
         full_messages = cls._build_messages(messages, user_memory)
@@ -126,6 +164,7 @@ class AIService:
         temperature: float = 0.5,
         max_tokens: int = 2000,
         timeout: float = 180.0,
+        openid: Optional[str] = None,
     ) -> Dict:
         """
         JSON 模式 AI 对话 - 使用大模型原生 JSON 能力
@@ -136,6 +175,7 @@ class AIService:
             temperature: 生成温度（JSON 模式建议用较低温度）
             max_tokens: 最大生成长度
             timeout: 超时时间（秒），默认 180 秒
+            openid: 用户 openid，用于获取用户配置的模型
         
         Returns:
             解析后的 JSON 字典
@@ -143,11 +183,8 @@ class AIService:
         import logging
         logger = logging.getLogger(__name__)
         
-        config = AI_MODELS.get(model_type, AI_MODELS["text"])
-        
-        if not config.get('api_key'):
-            logger.error(f"[AIService] {model_type} 模型 API Key 未配置")
-            raise ValueError(f"AI 服务配置错误：{model_type} 模型 API Key 未设置")
+        # 获取用户配置的模型
+        config = await cls._get_model_config(openid, model_type)
         
         # 对于 JSON 模式，不需要系统提示词（避免干扰 JSON 输出）
         full_messages = messages.copy()
@@ -213,6 +250,7 @@ class AIService:
         temperature: float = 0.7,
         max_tokens: int = 2000,
         user_memory: Optional[Dict] = None,
+        openid: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式 AI 对话
@@ -223,11 +261,13 @@ class AIService:
             temperature: 生成温度
             max_tokens: 最大生成长度
             user_memory: 用户记忆/画像
+            openid: 用户 openid，用于获取用户配置的模型
         
         Yields:
             AI 回复内容片段
         """
-        config = AI_MODELS.get(model_type, AI_MODELS["text"])
+        # 获取用户配置的模型
+        config = await cls._get_model_config(openid, model_type)
         
         # 构建完整的消息列表
         full_messages = cls._build_messages(messages, user_memory)
@@ -301,6 +341,7 @@ class AIService:
         image_url: str,
         recognize_type: str = "ocr",
         custom_prompt: Optional[str] = None,
+        openid: Optional[str] = None,
     ) -> str:
         """
         图片识别（非流式）
@@ -309,11 +350,13 @@ class AIService:
             image_url: 图片 URL
             recognize_type: 识别类型 (ocr/explain/summary/formula)
             custom_prompt: 自定义提示词
+            openid: 用户 openid，用于获取用户配置的模型
         
         Returns:
             识别结果
         """
-        config = AI_MODELS["vision"]
+        # 获取用户配置的多模态模型
+        config = await cls._get_model_config(openid, "multimodal")
         messages = cls._build_vision_messages(image_url, recognize_type, custom_prompt)
         
         async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
@@ -326,7 +369,7 @@ class AIService:
                 json={
                     "model": config["model"],
                     "messages": messages,
-                    "max_tokens": config["max_tokens"],
+                    "max_tokens": 4000,
                     "stream": False,
                 },
             )
@@ -345,6 +388,7 @@ class AIService:
         image_url: str,
         recognize_type: str = "ocr",
         custom_prompt: Optional[str] = None,
+        openid: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """
         图片识别（流式）
@@ -353,11 +397,13 @@ class AIService:
             image_url: 图片 URL
             recognize_type: 识别类型 (ocr/explain/summary/formula)
             custom_prompt: 自定义提示词
+            openid: 用户 openid，用于获取用户配置的模型
         
         Yields:
             识别结果片段
         """
-        config = AI_MODELS["vision"]
+        # 获取用户配置的多模态模型
+        config = await cls._get_model_config(openid, "multimodal")
         messages = cls._build_vision_messages(image_url, recognize_type, custom_prompt)
         
         async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
@@ -371,7 +417,7 @@ class AIService:
                 json={
                     "model": config["model"],
                     "messages": messages,
-                    "max_tokens": config["max_tokens"],
+                    "max_tokens": 4000,
                     "stream": True,
                 },
             ) as response:
@@ -400,6 +446,7 @@ class AIService:
         correct_answer: Optional[str] = None,
         subject: str = "",
         image_url: Optional[str] = None,
+        openid: Optional[str] = None,
     ) -> Dict:
         """
         错题分析
@@ -410,6 +457,7 @@ class AIService:
             correct_answer: 正确答案
             subject: 学科
             image_url: 题目图片
+            openid: 用户 openid，用于获取用户配置的模型
         
         Returns:
             分析结果字典
@@ -436,9 +484,12 @@ class AIService:
     "study_suggestions": ["学习建议1", "建议2", "建议3"]
 }}"""
 
-        # 如果有图片，使用视觉模型
+        # 根据是否有图片选择模型类型
+        model_type = "multimodal" if image_url else "text"
+        config = await cls._get_model_config(openid, model_type)
+        
+        # 构建消息
         if image_url:
-            config = AI_MODELS["vision"]
             messages = [
                 {
                     "role": "user",
@@ -449,7 +500,6 @@ class AIService:
                 }
             ]
         else:
-            config = AI_MODELS["text"]
             messages = [{"role": "user", "content": prompt}]
         
         async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:

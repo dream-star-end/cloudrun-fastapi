@@ -74,6 +74,7 @@ async def chat(request: ChatRequest, raw_request: Request):
             temperature=request.temperature,
             max_tokens=request.max_tokens,
             user_memory=request.user_memory,
+            openid=openid,
         )
         
         # 保存 AI 回复
@@ -118,6 +119,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request):
                     temperature=request.temperature,
                     max_tokens=request.max_tokens,
                     user_memory=request.user_memory,
+                    openid=openid,
                 ):
                     full_content_holder["content"] += chunk
                     # SSE 格式，使用 JSON 编码（ensure_ascii=True 默认值）

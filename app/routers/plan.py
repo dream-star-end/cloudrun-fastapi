@@ -512,12 +512,14 @@ async def delete_plan(request: Request):
 
 
 @router.post("/generate", response_model=GeneratePlanResponse)
-async def generate_plan(request: GeneratePlanRequest):
+async def generate_plan(request: GeneratePlanRequest, raw_request: Request):
     """
     AI 生成学习计划
     """
     import logging
     logger = logging.getLogger(__name__)
+    
+    openid = _get_openid_from_request(raw_request)
     
     logger.info(f"[plan/generate] 收到请求: goal={request.goal[:50] if request.goal else ''}, domain={request.domain}")
     logger.info(f"[plan/generate] 参数: daily_hours={request.daily_hours}, deadline={request.deadline}, level={request.current_level}")
@@ -530,6 +532,7 @@ async def generate_plan(request: GeneratePlanRequest):
             deadline=request.deadline,
             current_level=request.current_level,
             preferences=request.preferences,
+            openid=openid,
         )
 
         logger.info(f"[plan/generate] AI 生成结果: success={result.get('success')}")
@@ -549,7 +552,7 @@ async def generate_plan(request: GeneratePlanRequest):
 
 
 @router.post("/generate/stream")
-async def generate_plan_stream(request: GeneratePlanRequest):
+async def generate_plan_stream(request: GeneratePlanRequest, raw_request: Request):
     """
     AI 生成学习计划（流式响应）
     
@@ -562,6 +565,8 @@ async def generate_plan_stream(request: GeneratePlanRequest):
     """
     import logging
     logger = logging.getLogger(__name__)
+    
+    openid = _get_openid_from_request(raw_request)
     
     logger.info(f"[plan/generate/stream] 收到请求: goal={request.goal[:50] if request.goal else ''}, domain={request.domain}")
     
@@ -592,6 +597,7 @@ async def generate_plan_stream(request: GeneratePlanRequest):
                 model_type="text",
                 temperature=0.7,
                 max_tokens=4000,
+                openid=openid,
             ):
                 full_content += chunk
                 # 发送内容片段
@@ -694,6 +700,7 @@ async def generate_phase_detail(request: Request):
         phase_goals=phase.get("goals", []),
         domain=plan.get("domainName") or plan.get("domain", ""),
         duration=phase.get("duration", "1周"),
+        openid=openid,
     )
 
     if not result.get("success"):
@@ -791,6 +798,7 @@ async def generate_phase_detail_stream(request: Request):
                 phase_goals=phase.get("goals", []),
                 domain=plan.get("domainName") or plan.get("domain", ""),
                 duration=phase.get("duration", "1周"),
+                openid=openid,
             )
             
             if result.get("success") and result.get("detail"):
@@ -1293,6 +1301,7 @@ async def generate_tomorrow_tasks(request: Request):
         learning_history={"avgCompletionRate": completion_rate},
         today_stats={"completionRate": completion_rate},
         learning_context=learning_context,
+        openid=openid,
     )
 
     for i, t in enumerate(tasks):
@@ -1509,6 +1518,7 @@ async def generate_tomorrow_tasks_stream(request: Request):
                 learning_history={"avgCompletionRate": completion_rate},
                 today_stats={"completionRate": completion_rate},
                 learning_context=learning_context,
+                openid=openid,
             ):
                 full_content += chunk
                 yield f"data: {json.dumps({'type': 'content', 'content': chunk})}\n\n"
@@ -1587,10 +1597,12 @@ async def generate_tomorrow_tasks_stream(request: Request):
 
 
 @router.post("/generate-tasks", response_model=GenerateTasksResponse)
-async def generate_daily_tasks(request: GenerateTasksRequest):
+async def generate_daily_tasks(request: GenerateTasksRequest, raw_request: Request):
     """
     生成每日学习任务（不保存，仅返回）
     """
+    openid = _get_openid_from_request(raw_request)
+    
     try:
         tasks = await PlanService.generate_daily_tasks(
             domain=request.domain,
@@ -1598,6 +1610,7 @@ async def generate_daily_tasks(request: GenerateTasksRequest):
             current_phase=request.current_phase,
             learning_history=request.learning_history,
             today_stats=request.today_stats,
+            openid=openid,
         )
         return GenerateTasksResponse(success=True, tasks=tasks)
     except Exception as e:
@@ -1605,10 +1618,12 @@ async def generate_daily_tasks(request: GenerateTasksRequest):
 
 
 @router.post("/analyze-mistake", response_model=AnalyzeMistakeResponse)
-async def analyze_mistake(request: AnalyzeMistakeRequest):
+async def analyze_mistake(request: AnalyzeMistakeRequest, raw_request: Request):
     """
     错题分析
     """
+    openid = _get_openid_from_request(raw_request)
+    
     try:
         analysis = await AIService.analyze_mistake(
             question=request.question,
@@ -1616,6 +1631,7 @@ async def analyze_mistake(request: AnalyzeMistakeRequest):
             correct_answer=request.correct_answer,
             subject=request.subject,
             image_url=request.image_url,
+            openid=openid,
         )
         return AnalyzeMistakeResponse(success=True, analysis=analysis)
     except Exception as e:
