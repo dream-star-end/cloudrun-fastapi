@@ -484,8 +484,13 @@ class GeminiAudioDispatcher(GeminiDispatcher):
     """
     Gemini 音频理解分发器
     
-    根据 Google Gemini API 文档，支持通过 inline_data 或 file_data 传递音频
-    参考: https://ai.google.dev/gemini-api/docs/audio
+    支持两种调用方式：
+    1. 原生 Gemini API: 使用 inline_data 或 file_data 传递音频
+    2. OpenRouter 代理: 使用 OpenAI 兼容格式，通过 input_audio 传递音频
+    
+    参考: 
+    - Google Gemini: https://ai.google.dev/gemini-api/docs/audio
+    - OpenRouter: https://openrouter.ai/docs/features/audio-inputs
     """
     
     async def call(
@@ -509,24 +514,371 @@ class GeminiAudioDispatcher(GeminiDispatcher):
         base_url = config["base_url"]
         api_key = config["api_key"]
         model = config["model"]
+        platform = config.get("platform", "gemini")
         
         logger.info(f"[GeminiAudioDispatcher] 开始处理音频: voice_url={voice_url[:50] if voice_url else 'None'}...")
         
-        # 构建包含音频的 Gemini 请求
-        contents = await self._build_audio_contents(messages, voice_url)
-        
         if "generativelanguage.googleapis.com" in base_url:
             # 原生 Gemini API
+            contents = await self._build_audio_contents(messages, voice_url)
             async for event in self._call_native_gemini(
                 base_url, api_key, model, contents, stream, openid
             ):
                 yield event
-        else:
-            # OpenAI 兼容代理不支持音频，降级到文本处理
-            logger.warning(f"[GeminiAudioDispatcher] OpenAI 兼容代理不支持音频，降级到文本处理")
-            dispatcher = OpenAICompatibleDispatcher()
-            async for event in dispatcher.call(config, messages, stream, openid, voice_url):
+        elif "openrouter.ai" in base_url:
+            # OpenRouter 代理 - 使用 OpenAI 兼容格式传递音频
+            logger.info(f"[GeminiAudioDispatcher] 使用 OpenRouter 音频格式")
+            async for event in self._call_openrouter_with_audio(
+                config, messages, stream, openid, voice_url
+            ):
                 yield event
+        else:
+            # 其他 OpenAI 兼容代理 - 尝试下载音频并转为 base64
+            logger.info(f"[GeminiAudioDispatcher] 尝试使用 base64 音频格式")
+            async for event in self._call_openai_compatible_with_audio(
+                config, messages, stream, openid, voice_url
+            ):
+                yield event
+    
+    async def _call_openrouter_with_audio(
+        self,
+        config: Dict[str, Any],
+        messages: List[Dict],
+        stream: bool,
+        openid: str = None,
+        voice_url: str = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        通过 OpenRouter 调用支持音频的模型
+        
+        OpenRouter 支持两种音频输入格式：
+        1. URL 格式: {"type": "input_audio", "input_audio": {"url": "https://..."}}
+        2. Base64 格式: {"type": "input_audio", "input_audio": {"data": "base64...", "format": "mp3"}}
+        
+        参考: https://openrouter.ai/docs/features/audio-inputs
+        """
+        base_url = config["base_url"]
+        api_key = config["api_key"]
+        model = config["model"]
+        platform = config.get("platform", "openrouter")
+        
+        # 构建包含音频的消息
+        audio_messages = await self._build_openrouter_audio_messages(messages, voice_url)
+        
+        request_body = {
+            "model": model,
+            "messages": audio_messages,
+            "temperature": 0.7,
+            "max_tokens": 4000,
+            "stream": stream,
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        
+        logger.info(f"[GeminiAudioDispatcher] OpenRouter 请求: model={model}, stream={stream}")
+        
+        if stream:
+            async for event in self._stream_openrouter_request(
+                base_url, headers, request_body, platform, model, openid
+            ):
+                yield event
+        else:
+            result = await self._non_stream_openrouter_request(
+                base_url, headers, request_body, platform, model, openid
+            )
+            yield result
+    
+    async def _build_openrouter_audio_messages(
+        self,
+        messages: List[Dict],
+        voice_url: str,
+    ) -> List[Dict]:
+        """
+        构建 OpenRouter 格式的音频消息
+        
+        OpenRouter 音频格式：
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "请听取并回复这段语音"},
+                {"type": "input_audio", "input_audio": {"url": "https://..."}}
+            ]
+        }
+        """
+        result_messages = []
+        user_text = ""
+        
+        # 处理消息列表
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            
+            if role == "system":
+                # 系统消息保持不变
+                result_messages.append({"role": "system", "content": content})
+            elif role == "user":
+                # 提取用户文本
+                if isinstance(content, str):
+                    user_text = content
+                elif isinstance(content, list):
+                    for item in content:
+                        if item.get("type") == "text":
+                            user_text = item.get("text", "")
+                            break
+            else:
+                # assistant 等其他角色消息保持不变
+                result_messages.append({"role": role, "content": content})
+        
+        # 构建包含音频的用户消息
+        user_content = []
+        
+        # 添加文本
+        prompt = user_text or "请听取并回复这段语音内容"
+        user_content.append({"type": "text", "text": prompt})
+        
+        # 添加音频 - 使用 URL 格式
+        if voice_url:
+            user_content.append({
+                "type": "input_audio",
+                "input_audio": {
+                    "url": voice_url
+                }
+            })
+            logger.info(f"[GeminiAudioDispatcher] 添加音频 URL: {voice_url[:50]}...")
+        
+        result_messages.append({
+            "role": "user",
+            "content": user_content
+        })
+        
+        return result_messages
+    
+    async def _stream_openrouter_request(
+        self,
+        base_url: str,
+        headers: Dict[str, str],
+        request_body: Dict[str, Any],
+        platform: str,
+        model: str,
+        openid: str = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """OpenRouter 流式请求"""
+        partial_content_length = 0
+        
+        try:
+            async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
+                async with client.stream(
+                    "POST",
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json=request_body,
+                ) as response:
+                    if response.status_code != 200:
+                        error_text = ""
+                        async for chunk in response.aiter_text():
+                            error_text += chunk
+                            if len(error_text) > 500:
+                                break
+                        
+                        log_model_error(
+                            message=f"OpenRouter 音频 API 错误",
+                            platform=platform,
+                            model=model,
+                            openid=openid,
+                            status_code=response.status_code,
+                            response_body=error_text,
+                        )
+                        logger.error(f"[GeminiAudioDispatcher] OpenRouter 错误: {response.status_code}, {error_text[:200]}")
+                        raise ValueError(f"OpenRouter API 错误 ({response.status_code})")
+                    
+                    async for line in response.aiter_lines():
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]":
+                                yield {"type": "done"}
+                                break
+                            
+                            try:
+                                data = json.loads(data_str)
+                                if data.get("choices") and data["choices"][0].get("delta"):
+                                    content = data["choices"][0]["delta"].get("content", "")
+                                    if content:
+                                        partial_content_length += len(content)
+                                        yield {"type": "text", "content": content}
+                            except json.JSONDecodeError:
+                                continue
+                                
+        except httpx.ReadTimeout as e:
+            log_stream_error(
+                message=f"OpenRouter 音频流式响应超时: {e}",
+                openid=openid,
+                partial_content_length=partial_content_length,
+                exception=e,
+            )
+            if partial_content_length > 0:
+                yield {
+                    "type": "stream_interrupted",
+                    "message": "响应超时，已显示部分内容",
+                    "partial_content_length": partial_content_length,
+                }
+                yield {"type": "done"}
+            else:
+                raise
+                
+        except Exception as e:
+            logger.error(f"[GeminiAudioDispatcher] OpenRouter 流式请求异常: {e}")
+            if partial_content_length > 0:
+                yield {
+                    "type": "stream_interrupted",
+                    "message": "响应异常，已显示部分内容",
+                    "partial_content_length": partial_content_length,
+                }
+                yield {"type": "done"}
+            else:
+                raise
+    
+    async def _non_stream_openrouter_request(
+        self,
+        base_url: str,
+        headers: Dict[str, str],
+        request_body: Dict[str, Any],
+        platform: str,
+        model: str,
+        openid: str = None,
+    ) -> Dict[str, Any]:
+        """OpenRouter 非流式请求"""
+        async with httpx.AsyncClient(**get_http_client_kwargs(120.0)) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json=request_body,
+            )
+            
+            if response.status_code != 200:
+                error_text = response.text[:500] if response.text else "无响应内容"
+                log_model_error(
+                    message=f"OpenRouter 音频 API 错误",
+                    platform=platform,
+                    model=model,
+                    openid=openid,
+                    status_code=response.status_code,
+                    response_body=error_text,
+                )
+                raise ValueError(f"OpenRouter API 错误 ({response.status_code})")
+            
+            data = response.json()
+            
+            if data.get("choices") and data["choices"][0].get("message"):
+                content = data["choices"][0]["message"]["content"]
+                return {"type": "text", "content": content}
+            
+            raise ValueError("OpenRouter 返回格式错误")
+    
+    async def _call_openai_compatible_with_audio(
+        self,
+        config: Dict[str, Any],
+        messages: List[Dict],
+        stream: bool,
+        openid: str = None,
+        voice_url: str = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        通过其他 OpenAI 兼容代理调用，使用 base64 音频格式
+        
+        下载音频文件并转为 base64，然后通过 image_url 格式传递
+        （某些代理支持这种方式）
+        """
+        base_url = config["base_url"]
+        api_key = config["api_key"]
+        model = config["model"]
+        platform = config.get("platform", "unknown")
+        
+        # 尝试下载音频并转为 base64
+        audio_base64 = None
+        mime_type = "audio/mp3"
+        
+        if voice_url:
+            try:
+                async with httpx.AsyncClient(**get_http_client_kwargs(30.0)) as client:
+                    response = await client.get(voice_url, follow_redirects=True)
+                    if response.status_code == 200:
+                        import base64
+                        audio_data = response.content
+                        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+                        mime_type = self._get_audio_mime_type(voice_url)
+                        logger.info(f"[GeminiAudioDispatcher] 音频下载成功: {len(audio_data)} bytes")
+            except Exception as e:
+                logger.warning(f"[GeminiAudioDispatcher] 音频下载失败: {e}")
+        
+        # 构建消息
+        user_text = ""
+        result_messages = []
+        
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            
+            if role == "user":
+                if isinstance(content, str):
+                    user_text = content
+                elif isinstance(content, list):
+                    for item in content:
+                        if item.get("type") == "text":
+                            user_text = item.get("text", "")
+                            break
+            else:
+                result_messages.append({"role": role, "content": content})
+        
+        # 构建用户消息
+        prompt = user_text or "请听取并回复这段语音内容"
+        
+        if audio_base64:
+            # 使用 base64 音频
+            user_content = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": audio_base64,
+                        "format": mime_type.split("/")[-1]  # mp3, wav 等
+                    }
+                }
+            ]
+            result_messages.append({"role": "user", "content": user_content})
+        else:
+            # 无法获取音频，降级到纯文本
+            logger.warning(f"[GeminiAudioDispatcher] 无法获取音频，降级到文本处理")
+            result_messages.append({"role": "user", "content": f"{prompt}\n\n[注意：语音文件无法访问]"})
+        
+        # 调用 API
+        request_body = {
+            "model": model,
+            "messages": result_messages,
+            "temperature": 0.7,
+            "max_tokens": 4000,
+            "stream": stream,
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        
+        if stream:
+            dispatcher = OpenAICompatibleDispatcher()
+            async for event in dispatcher._stream_request(
+                base_url, headers, request_body, platform, model, openid
+            ):
+                yield event
+        else:
+            dispatcher = OpenAICompatibleDispatcher()
+            result = await dispatcher._non_stream_request(
+                base_url, headers, request_body, platform, model, openid
+            )
+            yield result
     
     async def _build_audio_contents(
         self,
