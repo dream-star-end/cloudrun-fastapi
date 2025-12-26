@@ -883,6 +883,9 @@ class LearningAgent:
         voice_base64 = None
         voice_format = "mp3"
         
+        # 标记是否进行了语音转录（转录后需要重新选择文本模型）
+        did_voice_transcription = False
+        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL，检查是否需要转录
@@ -908,6 +911,7 @@ class LearningAgent:
                 try:
                     transcribed = await self._transcribe_voice(multimodal["voice_url"])
                     multimodal["voice_text"] = transcribed
+                    did_voice_transcription = True
                 except Exception as e:
                     logger.error(f"[LearningAgent] 语音转录失败，降级到文本: {e}")
             
@@ -922,6 +926,19 @@ class LearningAgent:
         else:
             content = message
             text_for_log = message
+        
+        # 语音转录后，需要重新获取文本模型进行对话
+        # 因为语音模型（如 Gemini）可能使用非 OpenAI 兼容的 API 格式
+        # LangChain 的 ChatOpenAI 只支持 OpenAI 兼容格式
+        if did_voice_transcription:
+            logger.info("[LearningAgent] 语音转录完成，重新获取文本模型进行对话")
+            # 清除缓存的语音模型 LLM，强制重新获取文本模型
+            cache_key = f"{self.user_id}:voice"
+            if cache_key in self._llm_cache:
+                del self._llm_cache[cache_key]
+            # 获取文本模型（传入 None 表示纯文本消息）
+            llm = await self._get_llm_for_message(None)
+            logger.info(f"[LearningAgent] 切换到文本模型: {self._current_model_info}")
         
         # 创建/更新 Agent（使用选定的 LLM）
         self._create_agent(llm)
@@ -1007,6 +1024,9 @@ class LearningAgent:
         voice_base64 = None
         voice_format = "mp3"
         
+        # 标记是否进行了语音转录（转录后需要重新选择文本模型）
+        did_voice_transcription = False
+        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL，检查是否需要转录
@@ -1032,6 +1052,7 @@ class LearningAgent:
                 try:
                     transcribed = await self._transcribe_voice(multimodal["voice_url"])
                     multimodal["voice_text"] = transcribed
+                    did_voice_transcription = True
                     # 发送转录事件
                     yield {"type": "transcription", "text": transcribed}
                 except Exception as e:
@@ -1050,6 +1071,19 @@ class LearningAgent:
         else:
             content = message
             text_for_log = message
+        
+        # 语音转录后，需要重新获取文本模型进行对话
+        # 因为语音模型（如 Gemini）可能使用非 OpenAI 兼容的 API 格式
+        # LangChain 的 ChatOpenAI 只支持 OpenAI 兼容格式
+        if did_voice_transcription:
+            logger.info("[LearningAgent] 语音转录完成，重新获取文本模型进行对话")
+            # 清除缓存的语音模型 LLM，强制重新获取文本模型
+            cache_key = f"{self.user_id}:voice"
+            if cache_key in self._llm_cache:
+                del self._llm_cache[cache_key]
+            # 获取文本模型（传入 None 表示纯文本消息）
+            llm = await self._get_llm_for_message(None)
+            logger.info(f"[LearningAgent] 切换到文本模型: {self._current_model_info}")
         
         # 创建/更新 Agent（使用选定的 LLM）
         self._create_agent(llm)
