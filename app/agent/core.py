@@ -525,12 +525,16 @@ class LearningAgent:
         # 智能模型路由：根据消息类型获取合适的 LLM（需要先获取，才能知道是否支持多模态）
         llm = await self._get_llm_for_message(multimodal)
         
-        # 判断当前模型是否支持多模态
+        # 判断当前模型是否支持多模态（用户配置了多模态模型）
         is_multimodal_model = (
             self._current_model_info and 
-            self._current_model_info.get("type") == "multimodal" and
             self._current_model_info.get("is_user_config", False)
         )
+        
+        # 检查是否有图片
+        has_image = multimodal and (multimodal.get("image_url") or multimodal.get("image_base64"))
+        
+        logger.info(f"[LearningAgent] 多模态判断: is_multimodal_model={is_multimodal_model}, has_image={has_image}, model_info={self._current_model_info}")
         
         # 构建消息内容
         if multimodal:
@@ -618,12 +622,16 @@ class LearningAgent:
         # 智能模型路由：根据消息类型获取合适的 LLM（需要先获取，才能知道是否支持多模态）
         llm = await self._get_llm_for_message(multimodal)
         
-        # 判断当前模型是否支持多模态
+        # 判断当前模型是否支持多模态（用户配置了多模态模型）
         is_multimodal_model = (
             self._current_model_info and 
-            self._current_model_info.get("type") == "multimodal" and
             self._current_model_info.get("is_user_config", False)
         )
+        
+        # 检查是否有图片
+        has_image = multimodal and (multimodal.get("image_url") or multimodal.get("image_base64"))
+        
+        logger.info(f"[LearningAgent] 流式多模态判断: is_multimodal_model={is_multimodal_model}, has_image={has_image}, model_info={self._current_model_info}")
         
         # 构建消息内容
         if multimodal:
