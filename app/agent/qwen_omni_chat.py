@@ -137,10 +137,11 @@ class ChatQwenOmni(BaseChatModel):
                                 content_parts.append({"type": "text", "text": item.get("text", "")})
                             elif item.get("type") in ("input_audio", "audio"):
                                 # 处理音频输入 - 同时支持多种格式
-                                # 格式1 (嵌套): {"type": "input_audio", "input_audio": {"data": "...", "format": "mp3"}}
-                                # 格式2 (嵌套): {"type": "audio", "audio": {"data": "...", "format": "mp3"}}
-                                # 格式3 (扁平): {"type": "audio", "data": "...", "format": "mp3"}
                                 item_type = item.get("type")
+                                
+                                # 打印 item 的所有键，用于调试
+                                item_keys = list(item.keys())
+                                logger.info(f"[ChatQwenOmni] 音频 item 键: {item_keys}")
                                 
                                 # 尝试从嵌套结构获取
                                 audio_data = item.get("input_audio") or item.get("audio")
@@ -149,12 +150,14 @@ class ChatQwenOmni(BaseChatModel):
                                     # 嵌套结构
                                     raw_data = audio_data.get("data", "")
                                     audio_format = audio_data.get("format", "mp3")
+                                    logger.info(f"[ChatQwenOmni] 使用嵌套结构: audio_data keys={list(audio_data.keys())}")
                                 else:
                                     # 扁平结构 - 直接从 item 获取
                                     raw_data = item.get("data", "")
                                     audio_format = item.get("format", "mp3")
+                                    logger.info(f"[ChatQwenOmni] 使用扁平结构: data存在={bool(raw_data)}, format={audio_format}")
                                 
-                                logger.info(f"[ChatQwenOmni] 检测到音频: item_type={item_type}, format={audio_format}, data_size={len(raw_data)} chars, 结构={'嵌套' if audio_data else '扁平'}")
+                                logger.info(f"[ChatQwenOmni] 检测到音频: item_type={item_type}, format={audio_format}, data_size={len(raw_data)} chars")
                                 
                                 # 构建 MIME 类型
                                 mime_type_map = {
