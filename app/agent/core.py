@@ -13,11 +13,14 @@ AI Agent 核心模块
 
 import json
 import logging
-from typing import AsyncIterator, Optional, Dict, Any, List, Union
+from typing import AsyncIterator, Optional, Dict, Any, List, Union, TYPE_CHECKING
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
+
+if TYPE_CHECKING:
+    from .gemini_chat import ChatGeminiCustom
 
 from .tools import get_all_tools
 from .memory import AgentMemory
@@ -202,46 +205,66 @@ class LearningAgent:
     def _create_llm(
         self,
         model_config: Dict[str, Any],
-    ) -> ChatOpenAI:
+    ) -> Union[ChatOpenAI, "ChatGeminiCustom"]:
         """
         根据模型配置创建 LLM 实例
         
+        支持两种 LLM 类型：
+        - ChatOpenAI: 用于 OpenAI 兼容 API（DeepSeek、OpenRouter 等）
+        - ChatGeminiCustom: 用于原生 Gemini API 格式（支持自定义 base_url）
+        
         Args:
-            model_config: 模型配置，包含 platform, model, base_url, api_key
+            model_config: 模型配置，包含 platform, model, base_url, api_key, api_format
             
         Returns:
-            ChatOpenAI 实例
+            ChatOpenAI 或 ChatGeminiCustom 实例
         """
         import httpx
-        
-        # 云托管环境中可能存在 SSL 证书问题，配置 HTTP 客户端
-        http_client = None
-        if IS_CLOUDRUN or DISABLE_SSL_VERIFY:
-            http_client = httpx.Client(verify=False, http2=False, timeout=120.0)
+        from .gemini_chat import ChatGeminiCustom
         
         platform = model_config.get("platform", "deepseek")
         model = model_config.get("model", "deepseek-chat")
         base_url = model_config.get("base_url", settings.DEEPSEEK_API_BASE)
         api_key = model_config.get("api_key", "")  # API Key 必须从用户配置获取
+        api_format = model_config.get("api_format", "openai")  # 默认 OpenAI 兼容格式
         
         if not api_key:
             logger.warning(f"[LearningAgent] API Key 未配置: platform={platform}, model={model}")
         
-        logger.info(f"[LearningAgent] 创建 LLM: platform={platform}, model={model}")
+        logger.info(f"[LearningAgent] 创建 LLM: platform={platform}, model={model}, api_format={api_format}")
         
-        return ChatOpenAI(
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            temperature=0.7,
-            streaming=True,
-            http_client=http_client,
-        )
+        # 根据 api_format 选择 LLM 类型
+        if api_format == "gemini":
+            # 使用自定义 Gemini LLM（支持原生 Gemini API 格式和音频输入）
+            logger.info(f"[LearningAgent] 使用 ChatGeminiCustom: base_url={base_url[:30]}...")
+            return ChatGeminiCustom(
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=0.7,
+                streaming=True,
+                timeout=120.0,
+            )
+        else:
+            # 使用 ChatOpenAI（OpenAI 兼容格式）
+            # 云托管环境中可能存在 SSL 证书问题，配置 HTTP 客户端
+            http_client = None
+            if IS_CLOUDRUN or DISABLE_SSL_VERIFY:
+                http_client = httpx.Client(verify=False, http2=False, timeout=120.0)
+            
+            return ChatOpenAI(
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=0.7,
+                streaming=True,
+                http_client=http_client,
+            )
     
     async def _get_llm_for_message(
         self,
         multimodal: Optional[Dict[str, Any]] = None,
-    ) -> ChatOpenAI:
+    ) -> Union[ChatOpenAI, Any]:
         """
         根据消息类型获取合适的 LLM
         
@@ -250,11 +273,15 @@ class LearningAgent:
         - 图片消息 → 用户配置的多模态/视觉模型
         - 语音消息 → 用户配置的语音模型（或降级到文本模型）
         
+        根据 api_format 返回不同的 LLM 类型：
+        - api_format="openai" → ChatOpenAI
+        - api_format="gemini" → ChatGeminiCustom
+        
         Args:
             multimodal: 多模态消息字典
             
         Returns:
-            ChatOpenAI 实例
+            ChatOpenAI 或 ChatGeminiCustom 实例
         """
         # 检测消息类型
         model_type = "text"  # 默认文本
@@ -325,7 +352,7 @@ class LearningAgent:
         
         return llm
     
-    def _create_agent(self, llm: ChatOpenAI):
+    def _create_agent(self, llm: Union[ChatOpenAI, Any]):
         """
         创建 LangGraph ReAct Agent
         
@@ -337,7 +364,7 @@ class LearningAgent:
         这样可以支持动态的用户画像和对话摘要注入
         
         Args:
-            llm: ChatOpenAI 实例（根据消息类型动态选择）
+            llm: ChatOpenAI 或 ChatGeminiCustom 实例（根据消息类型动态选择）
         """
         # 使用 LangGraph 创建 ReAct Agent
         # create_react_agent 返回一个 CompiledGraph
@@ -886,6 +913,10 @@ class LearningAgent:
         # 标记是否进行了语音转录（转录后需要重新选择文本模型）
         did_voice_transcription = False
         
+        # 检查当前 LLM 是否是 ChatGeminiCustom（可以直接处理音频）
+        from .gemini_chat import ChatGeminiCustom
+        is_gemini_llm = isinstance(llm, ChatGeminiCustom)
+        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL，检查是否需要转录
@@ -896,28 +927,32 @@ class LearningAgent:
                     model_type="voice",
                 )
                 model_types = voice_config.get("model_types", [])
+                api_format = voice_config.get("api_format", "openai")
                 
                 # 检查模型是否同时支持 text 和 voice（可以直接处理音频）
                 supports_direct_audio = "text" in model_types and "voice" in model_types
                 
-                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}")
+                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}, api_format={api_format}, is_gemini_llm={is_gemini_llm}")
                 
-                # 注意：LangChain 的 ChatOpenAI 不支持 input_audio 内容类型
-                # 即使模型支持直接音频输入（如 qwen-omni），也需要先转录为文本
-                # 因为 LangChain 只支持 text 和 image_url 内容类型
-                # 所以这里始终走转录路径，使用 Chat API 进行语音转文本
-                
-                # 始终转录语音
-                try:
-                    transcribed = await self._transcribe_voice(multimodal["voice_url"])
-                    multimodal["voice_text"] = transcribed
-                    did_voice_transcription = True
-                except Exception as e:
-                    logger.error(f"[LearningAgent] 语音转录失败，降级到文本: {e}")
+                # ChatGeminiCustom 支持直接处理音频，不需要转录
+                if is_gemini_llm and supports_direct_audio:
+                    # 下载音频并编码为 base64，直接发送给 Gemini
+                    logger.info("[LearningAgent] 使用 ChatGeminiCustom 直接处理音频")
+                    voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
+                else:
+                    # ChatOpenAI 不支持 input_audio 内容类型，需要先转录
+                    # 即使模型支持直接音频输入（如 qwen-omni），也需要先转录为文本
+                    logger.info("[LearningAgent] 使用转录模式处理语音")
+                    try:
+                        transcribed = await self._transcribe_voice(multimodal["voice_url"])
+                        multimodal["voice_text"] = transcribed
+                        did_voice_transcription = True
+                    except Exception as e:
+                        logger.error(f"[LearningAgent] 语音转录失败，降级到文本: {e}")
             
             content = self._build_multimodal_content(
                 multimodal, 
-                is_multimodal_model,
+                is_multimodal_model or is_gemini_llm,  # Gemini 也支持多模态
                 voice_base64=voice_base64,
                 voice_format=voice_format,
             )
@@ -927,10 +962,10 @@ class LearningAgent:
             content = message
             text_for_log = message
         
-        # 语音转录后，需要重新获取文本模型进行对话
-        # 因为语音模型（如 Gemini）可能使用非 OpenAI 兼容的 API 格式
-        # LangChain 的 ChatOpenAI 只支持 OpenAI 兼容格式
-        if did_voice_transcription:
+        # 语音转录后，如果使用的是 ChatOpenAI，需要重新获取文本模型进行对话
+        # 因为语音模型可能使用非 OpenAI 兼容的 API 格式
+        # 但如果是 ChatGeminiCustom，则不需要切换（它本身就支持对话）
+        if did_voice_transcription and not is_gemini_llm:
             logger.info("[LearningAgent] 语音转录完成，重新获取文本模型进行对话")
             # 清除缓存的语音模型 LLM，强制重新获取文本模型
             cache_key = f"{self.user_id}:voice"
@@ -1027,6 +1062,10 @@ class LearningAgent:
         # 标记是否进行了语音转录（转录后需要重新选择文本模型）
         did_voice_transcription = False
         
+        # 检查当前 LLM 是否是 ChatGeminiCustom（可以直接处理音频）
+        from .gemini_chat import ChatGeminiCustom
+        is_gemini_llm = isinstance(llm, ChatGeminiCustom)
+        
         # 构建消息内容
         if multimodal:
             # 如果有语音 URL，检查是否需要转录
@@ -1037,32 +1076,37 @@ class LearningAgent:
                     model_type="voice",
                 )
                 model_types = voice_config.get("model_types", [])
+                api_format = voice_config.get("api_format", "openai")
                 
                 # 检查模型是否同时支持 text 和 voice（可以直接处理音频）
                 supports_direct_audio = "text" in model_types and "voice" in model_types
                 
-                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}")
+                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}, api_format={api_format}, is_gemini_llm={is_gemini_llm}")
                 
-                # 注意：LangChain 的 ChatOpenAI 不支持 input_audio 内容类型
-                # 即使模型支持直接音频输入（如 qwen-omni），也需要先转录为文本
-                # 因为 LangChain 只支持 text 和 image_url 内容类型
-                # 所以这里始终走转录路径，使用 Chat API 进行语音转文本
-                
-                # 始终转录语音
-                try:
-                    transcribed = await self._transcribe_voice(multimodal["voice_url"])
-                    multimodal["voice_text"] = transcribed
-                    did_voice_transcription = True
-                    # 发送转录事件
-                    yield {"type": "transcription", "text": transcribed}
-                except Exception as e:
-                    logger.error(f"[LearningAgent] 语音转录失败: {e}")
-                    yield {"type": "error", "error": f"语音转录失败: {str(e)}"}
-                    return
+                # ChatGeminiCustom 支持直接处理音频，不需要转录
+                if is_gemini_llm and supports_direct_audio:
+                    # 下载音频并编码为 base64，直接发送给 Gemini
+                    logger.info("[LearningAgent] 使用 ChatGeminiCustom 直接处理音频")
+                    voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
+                    # 发送提示事件（告知用户正在处理音频）
+                    yield {"type": "thinking", "content": "正在处理语音..."}
+                else:
+                    # ChatOpenAI 不支持 input_audio 内容类型，需要先转录
+                    logger.info("[LearningAgent] 使用转录模式处理语音")
+                    try:
+                        transcribed = await self._transcribe_voice(multimodal["voice_url"])
+                        multimodal["voice_text"] = transcribed
+                        did_voice_transcription = True
+                        # 发送转录事件
+                        yield {"type": "transcription", "text": transcribed}
+                    except Exception as e:
+                        logger.error(f"[LearningAgent] 语音转录失败: {e}")
+                        yield {"type": "error", "error": f"语音转录失败: {str(e)}"}
+                        return
             
             content = self._build_multimodal_content(
                 multimodal, 
-                is_multimodal_model,
+                is_multimodal_model or is_gemini_llm,  # Gemini 也支持多模态
                 voice_base64=voice_base64,
                 voice_format=voice_format,
             )
@@ -1072,10 +1116,10 @@ class LearningAgent:
             content = message
             text_for_log = message
         
-        # 语音转录后，需要重新获取文本模型进行对话
-        # 因为语音模型（如 Gemini）可能使用非 OpenAI 兼容的 API 格式
-        # LangChain 的 ChatOpenAI 只支持 OpenAI 兼容格式
-        if did_voice_transcription:
+        # 语音转录后，如果使用的是 ChatOpenAI，需要重新获取文本模型进行对话
+        # 因为语音模型可能使用非 OpenAI 兼容的 API 格式
+        # 但如果是 ChatGeminiCustom，则不需要切换（它本身就支持对话）
+        if did_voice_transcription and not is_gemini_llm:
             logger.info("[LearningAgent] 语音转录完成，重新获取文本模型进行对话")
             # 清除缓存的语音模型 LLM，强制重新获取文本模型
             cache_key = f"{self.user_id}:voice"
