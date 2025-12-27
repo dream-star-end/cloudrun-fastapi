@@ -104,6 +104,8 @@ class ChatQwenOmni(BaseChatModel):
         """
         result = []
         
+        logger.info(f"[ChatQwenOmni] 转换消息: 共 {len(messages)} 条消息")
+        
         for msg in messages:
             if isinstance(msg, SystemMessage):
                 result.append({
@@ -112,6 +114,7 @@ class ChatQwenOmni(BaseChatModel):
                 })
             elif isinstance(msg, HumanMessage):
                 # 处理内容
+                logger.info(f"[ChatQwenOmni] HumanMessage 内容类型: {type(msg.content).__name__}")
                 if isinstance(msg.content, str):
                     result.append({
                         "role": "user",
@@ -119,6 +122,12 @@ class ChatQwenOmni(BaseChatModel):
                     })
                 elif isinstance(msg.content, list):
                     # 多模态内容列表
+                    logger.info(f"[ChatQwenOmni] HumanMessage 列表内容: {len(msg.content)} 项")
+                    for idx, item in enumerate(msg.content):
+                        item_type = type(item).__name__
+                        item_content_type = item.get("type") if isinstance(item, dict) else "N/A"
+                        logger.info(f"[ChatQwenOmni] - 项 {idx}: 类型={item_type}, content_type={item_content_type}")
+                    
                     content_parts = []
                     for item in msg.content:
                         if isinstance(item, str):
@@ -426,7 +435,9 @@ class ChatQwenOmni(BaseChatModel):
                 "Content-Type": "application/json",
             }
             
+            # 调试：打印请求体的关键信息
             logger.info(f"[ChatQwenOmni] 流式请求: {url}")
+            logger.info(f"[ChatQwenOmni] 请求体: model={body.get('model')}, messages_count={len(body.get('messages', []))}, modalities={body.get('modalities')}")
             
             async with client.stream("POST", url, json=body, headers=headers) as response:
                 if response.status_code != 200:
