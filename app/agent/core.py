@@ -21,6 +21,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 if TYPE_CHECKING:
     from .gemini_chat import ChatGeminiCustom
+    from .qwen_omni_chat import ChatQwenOmni
 
 from .tools import get_all_tools
 from .memory import AgentMemory
@@ -205,22 +206,24 @@ class LearningAgent:
     def _create_llm(
         self,
         model_config: Dict[str, Any],
-    ) -> Union[ChatOpenAI, "ChatGeminiCustom"]:
+    ) -> Union[ChatOpenAI, "ChatGeminiCustom", "ChatQwenOmni"]:
         """
         根据模型配置创建 LLM 实例
         
-        支持两种 LLM 类型：
+        支持三种 LLM 类型：
         - ChatOpenAI: 用于 OpenAI 兼容 API（DeepSeek、OpenRouter 等）
         - ChatGeminiCustom: 用于原生 Gemini API 格式（支持自定义 base_url）
+        - ChatQwenOmni: 用于 Qwen-Omni 系列模型（支持音频输入）
         
         Args:
             model_config: 模型配置，包含 platform, model, base_url, api_key, api_format
             
         Returns:
-            ChatOpenAI 或 ChatGeminiCustom 实例
+            ChatOpenAI、ChatGeminiCustom 或 ChatQwenOmni 实例
         """
         import httpx
         from .gemini_chat import ChatGeminiCustom
+        from .qwen_omni_chat import ChatQwenOmni
         
         platform = model_config.get("platform", "deepseek")
         model = model_config.get("model", "deepseek-chat")
@@ -233,11 +236,29 @@ class LearningAgent:
         
         logger.info(f"[LearningAgent] 创建 LLM: platform={platform}, model={model}, api_format={api_format}")
         
-        # 根据 api_format 选择 LLM 类型
+        # 检测是否是 Qwen-Omni 系列模型（支持音频输入）
+        model_lower = model.lower()
+        is_qwen_omni = any(pattern in model_lower for pattern in [
+            "qwen-omni", "qwen2.5-omni", "qwen3-omni", "qwen-audio",
+            "qwen2-audio", "qwen3-audio", "omni-turbo", "omni-flash"
+        ])
+        
+        # 根据 api_format 和模型类型选择 LLM 类型
         if api_format == "gemini":
             # 使用自定义 Gemini LLM（支持原生 Gemini API 格式和音频输入）
             logger.info(f"[LearningAgent] 使用 ChatGeminiCustom: base_url={base_url[:30]}...")
             return ChatGeminiCustom(
+                model=model,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=0.7,
+                streaming=True,
+                timeout=120.0,
+            )
+        elif is_qwen_omni or api_format == "qwen-omni":
+            # 使用自定义 Qwen-Omni LLM（支持音频输入）
+            logger.info(f"[LearningAgent] 使用 ChatQwenOmni: base_url={base_url[:30]}...")
+            return ChatQwenOmni(
                 model=model,
                 api_key=api_key,
                 base_url=base_url,
@@ -917,9 +938,13 @@ class LearningAgent:
         # 标记是否进行了语音转录（转录后需要重新选择文本模型）
         did_voice_transcription = False
         
-        # 检查当前 LLM 是否是 ChatGeminiCustom（可以直接处理音频）
+        # 检查当前 LLM 是否支持直接处理音频
         from .gemini_chat import ChatGeminiCustom
+        from .qwen_omni_chat import ChatQwenOmni
         is_gemini_llm = isinstance(llm, ChatGeminiCustom)
+        is_qwen_omni_llm = isinstance(llm, ChatQwenOmni)
+        # 支持直接音频输入的 LLM 类型
+        supports_direct_audio_llm = is_gemini_llm or is_qwen_omni_llm
         
         # 构建消息内容
         if multimodal:
@@ -936,16 +961,16 @@ class LearningAgent:
                 # 检查模型是否同时支持 text 和 voice（可以直接处理音频）
                 supports_direct_audio = "text" in model_types and "voice" in model_types
                 
-                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}, api_format={api_format}, is_gemini_llm={is_gemini_llm}")
+                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}, api_format={api_format}, is_gemini_llm={is_gemini_llm}, is_qwen_omni_llm={is_qwen_omni_llm}")
                 
-                # ChatGeminiCustom 支持直接处理音频，不需要转录
-                if is_gemini_llm and supports_direct_audio:
-                    # 下载音频并编码为 base64，直接发送给 Gemini
-                    logger.info("[LearningAgent] 使用 ChatGeminiCustom 直接处理音频")
+                # ChatGeminiCustom 或 ChatQwenOmni 支持直接处理音频，不需要转录
+                if supports_direct_audio_llm and supports_direct_audio:
+                    # 下载音频并编码为 base64，直接发送给模型
+                    llm_type = "ChatQwenOmni" if is_qwen_omni_llm else "ChatGeminiCustom"
+                    logger.info(f"[LearningAgent] 使用 {llm_type} 直接处理音频")
                     voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
                 else:
                     # ChatOpenAI 不支持 input_audio 内容类型，需要先转录
-                    # 即使模型支持直接音频输入（如 qwen-omni），也需要先转录为文本
                     logger.info("[LearningAgent] 使用转录模式处理语音")
                     try:
                         transcribed = await self._transcribe_voice(multimodal["voice_url"])
@@ -956,7 +981,7 @@ class LearningAgent:
             
             content = self._build_multimodal_content(
                 multimodal, 
-                is_multimodal_model or is_gemini_llm,  # Gemini 也支持多模态
+                is_multimodal_model or supports_direct_audio_llm,  # Gemini 和 QwenOmni 也支持多模态
                 voice_base64=voice_base64,
                 voice_format=voice_format,
             )
@@ -968,8 +993,8 @@ class LearningAgent:
         
         # 语音转录后，如果使用的是 ChatOpenAI，需要重新获取文本模型进行对话
         # 因为语音模型可能使用非 OpenAI 兼容的 API 格式
-        # 但如果是 ChatGeminiCustom，则不需要切换（它本身就支持对话）
-        if did_voice_transcription and not is_gemini_llm:
+        # 但如果是 ChatGeminiCustom 或 ChatQwenOmni，则不需要切换（它们本身就支持对话）
+        if did_voice_transcription and not supports_direct_audio_llm:
             logger.info("[LearningAgent] 语音转录完成，重新获取文本模型进行对话")
             # 清除缓存的语音模型 LLM，强制重新获取文本模型
             cache_key = f"{self.user_id}:voice"
@@ -1065,9 +1090,13 @@ class LearningAgent:
         # 标记是否进行了语音转录（转录后需要重新选择文本模型）
         did_voice_transcription = False
         
-        # 检查当前 LLM 是否是 ChatGeminiCustom（可以直接处理音频）
+        # 检查当前 LLM 是否支持直接处理音频
         from .gemini_chat import ChatGeminiCustom
+        from .qwen_omni_chat import ChatQwenOmni
         is_gemini_llm = isinstance(llm, ChatGeminiCustom)
+        is_qwen_omni_llm = isinstance(llm, ChatQwenOmni)
+        # 支持直接音频输入的 LLM 类型
+        supports_direct_audio_llm = is_gemini_llm or is_qwen_omni_llm
         
         # 构建消息内容
         if multimodal:
@@ -1084,12 +1113,13 @@ class LearningAgent:
                 # 检查模型是否同时支持 text 和 voice（可以直接处理音频）
                 supports_direct_audio = "text" in model_types and "voice" in model_types
                 
-                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}, api_format={api_format}, is_gemini_llm={is_gemini_llm}")
+                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}, api_format={api_format}, is_gemini_llm={is_gemini_llm}, is_qwen_omni_llm={is_qwen_omni_llm}")
                 
-                # ChatGeminiCustom 支持直接处理音频，不需要转录
-                if is_gemini_llm and supports_direct_audio:
-                    # 下载音频并编码为 base64，直接发送给 Gemini
-                    logger.info("[LearningAgent] 使用 ChatGeminiCustom 直接处理音频")
+                # ChatGeminiCustom 或 ChatQwenOmni 支持直接处理音频，不需要转录
+                if supports_direct_audio_llm and supports_direct_audio:
+                    # 下载音频并编码为 base64，直接发送给模型
+                    llm_type = "ChatQwenOmni" if is_qwen_omni_llm else "ChatGeminiCustom"
+                    logger.info(f"[LearningAgent] 使用 {llm_type} 直接处理音频")
                     voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
                     # 发送提示事件（告知用户正在处理音频）
                     yield {"type": "thinking", "content": "正在处理语音..."}
@@ -1109,7 +1139,7 @@ class LearningAgent:
             
             content = self._build_multimodal_content(
                 multimodal, 
-                is_multimodal_model or is_gemini_llm,  # Gemini 也支持多模态
+                is_multimodal_model or supports_direct_audio_llm,  # Gemini 和 QwenOmni 也支持多模态
                 voice_base64=voice_base64,
                 voice_format=voice_format,
             )
@@ -1121,8 +1151,8 @@ class LearningAgent:
         
         # 语音转录后，如果使用的是 ChatOpenAI，需要重新获取文本模型进行对话
         # 因为语音模型可能使用非 OpenAI 兼容的 API 格式
-        # 但如果是 ChatGeminiCustom，则不需要切换（它本身就支持对话）
-        if did_voice_transcription and not is_gemini_llm:
+        # 但如果是 ChatGeminiCustom 或 ChatQwenOmni，则不需要切换（它们本身就支持对话）
+        if did_voice_transcription and not supports_direct_audio_llm:
             logger.info("[LearningAgent] 语音转录完成，重新获取文本模型进行对话")
             # 清除缓存的语音模型 LLM，强制重新获取文本模型
             cache_key = f"{self.user_id}:voice"
