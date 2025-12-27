@@ -401,10 +401,13 @@ class ChatGeminiCustom(BaseChatModel):
                             tool_calls = self._extract_tool_calls_from_stream_chunk(obj)
                             
                             if text or tool_calls:
-                                chunk_msg = AIMessageChunk(
-                                    content=text or "",
-                                    tool_calls=tool_calls if tool_calls else None,
-                                )
+                                # 注意: tool_calls 必须是列表或不传，不能是 None
+                                # Pydantic 验证要求 tool_calls 为 list 类型
+                                chunk_kwargs = {"content": text or ""}
+                                if tool_calls:
+                                    chunk_kwargs["tool_calls"] = tool_calls
+                                
+                                chunk_msg = AIMessageChunk(**chunk_kwargs)
                                 gen_chunk = ChatGenerationChunk(message=chunk_msg)
                                 
                                 if run_manager and text:
@@ -464,10 +467,13 @@ class ChatGeminiCustom(BaseChatModel):
                             
                             if text or tool_calls:
                                 chunk_count += 1
-                                chunk_msg = AIMessageChunk(
-                                    content=text or "",
-                                    tool_calls=tool_calls if tool_calls else None,
-                                )
+                                # 注意: tool_calls 必须是列表或不传，不能是 None
+                                # Pydantic 验证要求 tool_calls 为 list 类型
+                                chunk_kwargs = {"content": text or ""}
+                                if tool_calls:
+                                    chunk_kwargs["tool_calls"] = tool_calls
+                                
+                                chunk_msg = AIMessageChunk(**chunk_kwargs)
                                 gen_chunk = ChatGenerationChunk(message=chunk_msg)
                                 
                                 # 关键：通知 run_manager 新的 token
