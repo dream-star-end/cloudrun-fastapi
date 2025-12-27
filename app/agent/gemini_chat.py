@@ -104,7 +104,13 @@ class ChatGeminiCustom(BaseChatModel):
             base = base[:-3]
         
         action = "streamGenerateContent" if stream else "generateContent"
-        return f"{base}/v1beta/models/{self.model}:{action}?key={self.api_key}"
+        url = f"{base}/v1beta/models/{self.model}:{action}?key={self.api_key}"
+        
+        # 流式请求需要添加 alt=sse 参数，返回 SSE 格式
+        if stream:
+            url += "&alt=sse"
+        
+        return url
     
     def _convert_messages_to_gemini_format(
         self,
@@ -366,7 +372,7 @@ class ChatGeminiCustom(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        """同步流式生成"""
+        """同步流式生成（使用 SSE 格式）"""
         with httpx.Client(timeout=self.timeout, verify=False) as client:
             url = self._get_api_url(stream=True)
             body = self._build_request_body(messages, kwargs.get("tools"))
@@ -381,67 +387,32 @@ class ChatGeminiCustom(BaseChatModel):
                     error_text = response.read().decode()
                     raise ValueError(f"Gemini API 错误: {response.status_code} - {error_text[:500]}")
                 
-                buffer = ""
-                for chunk in response.iter_text():
-                    buffer += chunk
-                    # Gemini 流式响应是 JSON 数组，每个元素是一个完整的响应
-                    # 格式: [{"candidates":...},{"candidates":...}]
-                    # 或者每行一个 JSON 对象
-                    while True:
-                        # 尝试解析 JSON
+                # SSE 格式：每行以 "data: " 开头
+                for line in response.iter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    if line.startswith("data: "):
+                        data_str = line[6:]
                         try:
-                            # 处理 JSON 数组格式
-                            if buffer.startswith("["):
-                                # 找到完整的 JSON 对象
-                                depth = 0
-                                start = 1  # 跳过开头的 [
-                                for i, c in enumerate(buffer[1:], 1):
-                                    if c == '{':
-                                        if depth == 0:
-                                            start = i
-                                        depth += 1
-                                    elif c == '}':
-                                        depth -= 1
-                                        if depth == 0:
-                                            # 找到完整的对象
-                                            obj_str = buffer[start:i+1]
-                                            try:
-                                                obj = json.loads(obj_str)
-                                                text = self._extract_text_from_stream_chunk(obj)
-                                                if text:
-                                                    yield ChatGenerationChunk(
-                                                        message=AIMessageChunk(content=text)
-                                                    )
-                                            except json.JSONDecodeError:
-                                                pass
-                                            # 移除已处理的部分
-                                            buffer = buffer[i+1:].lstrip(',').lstrip()
-                                            if buffer.startswith("]"):
-                                                buffer = ""
-                                            break
-                                else:
-                                    # 没有找到完整对象，等待更多数据
-                                    break
-                            else:
-                                # 尝试按行解析
-                                if '\n' in buffer:
-                                    line, buffer = buffer.split('\n', 1)
-                                    line = line.strip()
-                                    if line:
-                                        try:
-                                            obj = json.loads(line)
-                                            text = self._extract_text_from_stream_chunk(obj)
-                                            if text:
-                                                yield ChatGenerationChunk(
-                                                    message=AIMessageChunk(content=text)
-                                                )
-                                        except json.JSONDecodeError:
-                                            pass
-                                else:
-                                    break
-                        except Exception as e:
-                            logger.debug(f"解析流式响应时出错: {e}")
-                            break
+                            obj = json.loads(data_str)
+                            text = self._extract_text_from_stream_chunk(obj)
+                            tool_calls = self._extract_tool_calls_from_stream_chunk(obj)
+                            
+                            if text or tool_calls:
+                                chunk_msg = AIMessageChunk(
+                                    content=text or "",
+                                    tool_calls=tool_calls if tool_calls else None,
+                                )
+                                gen_chunk = ChatGenerationChunk(message=chunk_msg)
+                                
+                                if run_manager and text:
+                                    run_manager.on_llm_new_token(text, chunk=gen_chunk)
+                                
+                                yield gen_chunk
+                        except json.JSONDecodeError:
+                            continue
 
     async def _astream(
         self,
@@ -450,12 +421,20 @@ class ChatGeminiCustom(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
-        """异步流式生成"""
+        """
+        异步流式生成
+        
+        使用 SSE 格式（alt=sse 参数）接收流式响应
+        每行格式: data: {...json...}
+        
+        重要：必须通过 run_manager.on_llm_new_token() 通知 LangGraph 新的 token
+        否则 astream_events 无法捕获流式输出
+        """
         async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
             url = self._get_api_url(stream=True)
             body = self._build_request_body(messages, kwargs.get("tools"))
             
-            logger.info(f"[ChatGeminiCustom] 流式请求: {url[:80]}...")
+            logger.info(f"[ChatGeminiCustom] 流式请求 (SSE): {url[:80]}...")
             
             async with client.stream(
                 "POST",
@@ -467,71 +446,44 @@ class ChatGeminiCustom(BaseChatModel):
                     error_text = await response.aread()
                     raise ValueError(f"Gemini API 错误: {response.status_code} - {error_text.decode()[:500]}")
                 
-                buffer = ""
-                async for chunk in response.aiter_text():
-                    buffer += chunk
+                chunk_count = 0
+                
+                # SSE 格式：每行以 "data: " 开头
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
                     
-                    # 处理流式响应
-                    while True:
+                    # 处理 SSE 数据行
+                    if line.startswith("data: "):
+                        data_str = line[6:]  # 移除 "data: " 前缀
                         try:
-                            if buffer.startswith("["):
-                                # JSON 数组格式
-                                depth = 0
-                                start = 1
-                                found = False
-                                for i, c in enumerate(buffer[1:], 1):
-                                    if c == '{':
-                                        if depth == 0:
-                                            start = i
-                                        depth += 1
-                                    elif c == '}':
-                                        depth -= 1
-                                        if depth == 0:
-                                            obj_str = buffer[start:i+1]
-                                            try:
-                                                obj = json.loads(obj_str)
-                                                text = self._extract_text_from_stream_chunk(obj)
-                                                tool_calls = self._extract_tool_calls_from_stream_chunk(obj)
-                                                
-                                                if text or tool_calls:
-                                                    chunk_msg = AIMessageChunk(
-                                                        content=text or "",
-                                                        tool_calls=tool_calls if tool_calls else None,
-                                                    )
-                                                    yield ChatGenerationChunk(message=chunk_msg)
-                                            except json.JSONDecodeError:
-                                                pass
-                                            buffer = buffer[i+1:].lstrip(',').lstrip()
-                                            if buffer.startswith("]"):
-                                                buffer = ""
-                                            found = True
-                                            break
-                                if not found:
-                                    break
-                            else:
-                                # 按行解析
-                                if '\n' in buffer:
-                                    line, buffer = buffer.split('\n', 1)
-                                    line = line.strip()
-                                    if line:
-                                        try:
-                                            obj = json.loads(line)
-                                            text = self._extract_text_from_stream_chunk(obj)
-                                            tool_calls = self._extract_tool_calls_from_stream_chunk(obj)
-                                            
-                                            if text or tool_calls:
-                                                chunk_msg = AIMessageChunk(
-                                                    content=text or "",
-                                                    tool_calls=tool_calls if tool_calls else None,
-                                                )
-                                                yield ChatGenerationChunk(message=chunk_msg)
-                                        except json.JSONDecodeError:
-                                            pass
-                                else:
-                                    break
-                        except Exception as e:
-                            logger.debug(f"解析流式响应时出错: {e}")
-                            break
+                            obj = json.loads(data_str)
+                            text = self._extract_text_from_stream_chunk(obj)
+                            tool_calls = self._extract_tool_calls_from_stream_chunk(obj)
+                            
+                            if text or tool_calls:
+                                chunk_count += 1
+                                chunk_msg = AIMessageChunk(
+                                    content=text or "",
+                                    tool_calls=tool_calls if tool_calls else None,
+                                )
+                                gen_chunk = ChatGenerationChunk(message=chunk_msg)
+                                
+                                # 关键：通知 run_manager 新的 token
+                                # 这样 LangGraph 的 astream_events 才能捕获
+                                if run_manager and text:
+                                    await run_manager.on_llm_new_token(text, chunk=gen_chunk)
+                                
+                                if chunk_count <= 3:
+                                    logger.debug(f"[ChatGeminiCustom] SSE 块 #{chunk_count}: text={text[:50] if text else 'None'}...")
+                                
+                                yield gen_chunk
+                        except json.JSONDecodeError as e:
+                            logger.debug(f"[ChatGeminiCustom] JSON 解析失败: {e}, line={line[:100]}")
+                            continue
+                
+                logger.info(f"[ChatGeminiCustom] 流式完成，共 {chunk_count} 个块")
     
     def _extract_text_from_stream_chunk(self, chunk: Dict[str, Any]) -> str:
         """从流式响应块中提取文本"""
