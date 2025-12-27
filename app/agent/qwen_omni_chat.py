@@ -127,9 +127,8 @@ class ChatQwenOmni(BaseChatModel):
                             if item.get("type") == "text":
                                 content_parts.append({"type": "text", "text": item.get("text", "")})
                             elif item.get("type") == "input_audio":
-                                # 处理音频输入 - Qwen-Omni 使用不同的格式
-                                # OpenAI: {"type": "input_audio", "input_audio": {"data": "...", "format": "mp3"}}
-                                # Qwen-Omni: {"type": "audio", "audio": "data:audio/mp3;base64,..."}
+                                # 处理音频输入 - Qwen-Omni 使用 input_audio 格式
+                                # 正确格式: {"type": "input_audio", "input_audio": {"data": "data:audio/wav;base64,...", "format": "wav"}}
                                 audio_data = item.get("input_audio", {})
                                 raw_data = audio_data.get("data", "")
                                 audio_format = audio_data.get("format", "mp3")
@@ -144,17 +143,21 @@ class ChatQwenOmni(BaseChatModel):
                                 }
                                 mime_type = mime_type_map.get(audio_format.lower(), f"audio/{audio_format}")
                                 
-                                # Qwen-Omni 格式：data:audio/mpeg;base64,<base64_data>
+                                # 确保 data 字段是完整的 data URL 格式
                                 if raw_data.startswith("data:"):
-                                    audio_url = raw_data
+                                    audio_data_url = raw_data
                                 else:
-                                    audio_url = f"data:{mime_type};base64,{raw_data}"
+                                    audio_data_url = f"data:{mime_type};base64,{raw_data}"
                                 
+                                # Qwen-Omni 格式：保持 input_audio 结构，但 data 要是完整的 data URL
                                 content_parts.append({
-                                    "type": "audio",
-                                    "audio": audio_url,
+                                    "type": "input_audio",
+                                    "input_audio": {
+                                        "data": audio_data_url,
+                                        "format": audio_format,
+                                    }
                                 })
-                                logger.info(f"[ChatQwenOmni] 添加音频: mime_type={mime_type}, data_size={len(raw_data)} chars")
+                                logger.info(f"[ChatQwenOmni] 添加音频: format={audio_format}, mime_type={mime_type}, data_size={len(raw_data)} chars")
                             elif item.get("type") == "image_url":
                                 # 图片也支持
                                 content_parts.append(item)
@@ -246,6 +249,14 @@ class ChatQwenOmni(BaseChatModel):
         if self.max_tokens:
             body["max_tokens"] = self.max_tokens
         
+        # 检测消息中是否包含音频输入，如果有则添加 modalities 参数
+        has_audio_input = self._check_has_audio_input(qwen_messages)
+        if has_audio_input:
+            # Qwen-Omni 需要 modalities 参数来指定输出模态
+            # 这里只输出文本，不需要输出音频
+            body["modalities"] = ["text"]
+            logger.info(f"[ChatQwenOmni] 检测到音频输入，添加 modalities=[\"text\"]")
+        
         # 添加工具
         openai_tools = self._convert_tools_to_openai_format(tools)
         if openai_tools:
@@ -256,6 +267,16 @@ class ChatQwenOmni(BaseChatModel):
             body["stream_options"] = {"include_usage": True}
         
         return body
+    
+    def _check_has_audio_input(self, messages: List[Dict[str, Any]]) -> bool:
+        """检查消息中是否包含音频输入"""
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "input_audio":
+                        return True
+        return False
     
     def _parse_response(self, response_data: Dict[str, Any]) -> AIMessage:
         """解析非流式响应"""
