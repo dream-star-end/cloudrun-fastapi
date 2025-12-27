@@ -174,6 +174,12 @@ class ChatQwenOmni(BaseChatModel):
                                     audio_format = item.get("format", "mp3")
                                     logger.info(f"[ChatQwenOmni] 使用 data 字段")
                                 
+                                # 检测音频的真实格式（通过 Base64 前缀）
+                                detected_format = self._detect_audio_format(raw_data)
+                                if detected_format:
+                                    logger.info(f"[ChatQwenOmni] 检测到真实音频格式: {detected_format} (原标记: {audio_format})")
+                                    audio_format = detected_format
+                                
                                 logger.info(f"[ChatQwenOmni] 检测到音频: format={audio_format}, data_size={len(raw_data)} chars")
                                 
                                 # 构建 MIME 类型
@@ -183,6 +189,8 @@ class ChatQwenOmni(BaseChatModel):
                                     "wav": "audio/wav",
                                     "m4a": "audio/mp4",
                                     "ogg": "audio/ogg",
+                                    "webm": "audio/webm",
+                                    "opus": "audio/opus",
                                 }
                                 mime_type = mime_type_map.get(audio_format.lower(), f"audio/{audio_format}")
                                 
@@ -320,6 +328,54 @@ class ChatQwenOmni(BaseChatModel):
                     if isinstance(item, dict) and item.get("type") in ("input_audio", "audio"):
                         return True
         return False
+    
+    def _detect_audio_format(self, base64_data: str) -> Optional[str]:
+        """
+        通过 Base64 数据前缀检测音频的真实格式
+        
+        常见音频格式的 Base64 前缀：
+        - WebM: GkXfo (EBML header: 1A 45 DF A3)
+        - MP3 with ID3: SUQz (ID3 tag)
+        - MP3 without ID3: //uQ or //uY (MPEG frame sync)
+        - WAV: UklGR (RIFF header)
+        - OGG: T2dn (OggS header)
+        - FLAC: ZkxhQ (fLaC header)
+        - AAC: //vQ or AAAA (AAC frame)
+        """
+        if not base64_data or len(base64_data) < 8:
+            return None
+        
+        prefix = base64_data[:8]
+        
+        # WebM/Matroska (EBML header)
+        if prefix.startswith("GkXfo"):
+            return "webm"
+        
+        # MP3 with ID3 tag
+        if prefix.startswith("SUQz"):
+            return "mp3"
+        
+        # MP3 MPEG frame sync (无 ID3)
+        if prefix.startswith("//uQ") or prefix.startswith("//uY"):
+            return "mp3"
+        
+        # WAV (RIFF header)
+        if prefix.startswith("UklGR"):
+            return "wav"
+        
+        # OGG (OggS header)
+        if prefix.startswith("T2dn"):
+            return "ogg"
+        
+        # FLAC (fLaC header)
+        if prefix.startswith("ZkxhQ"):
+            return "flac"
+        
+        # AAC
+        if prefix.startswith("//vQ") or prefix.startswith("AAAA"):
+            return "aac"
+        
+        return None
     
     def _parse_response(self, response_data: Dict[str, Any]) -> AIMessage:
         """解析非流式响应"""
