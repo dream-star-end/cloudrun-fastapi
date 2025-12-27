@@ -136,28 +136,45 @@ class ChatQwenOmni(BaseChatModel):
                             if item.get("type") == "text":
                                 content_parts.append({"type": "text", "text": item.get("text", "")})
                             elif item.get("type") in ("input_audio", "audio"):
-                                # 处理音频输入 - 同时支持多种格式
+                                # 处理音频输入 - 支持多种格式
                                 item_type = item.get("type")
-                                
-                                # 打印 item 的所有键，用于调试
                                 item_keys = list(item.keys())
                                 logger.info(f"[ChatQwenOmni] 音频 item 键: {item_keys}")
                                 
-                                # 尝试从嵌套结构获取
+                                # 尝试从多种可能的字段获取数据
+                                # 格式1: {"type": "input_audio", "input_audio": {"data": "...", "format": "..."}}
+                                # 格式2: {"type": "audio", "audio": {"data": "...", "format": "..."}}
+                                # 格式3: {"type": "audio", "base64": "...", "mime_type": "..."}
+                                # 格式4: {"type": "audio", "data": "...", "format": "..."}
+                                
                                 audio_data = item.get("input_audio") or item.get("audio")
                                 
                                 if audio_data and isinstance(audio_data, dict):
                                     # 嵌套结构
                                     raw_data = audio_data.get("data", "")
                                     audio_format = audio_data.get("format", "mp3")
-                                    logger.info(f"[ChatQwenOmni] 使用嵌套结构: audio_data keys={list(audio_data.keys())}")
+                                    logger.info(f"[ChatQwenOmni] 使用嵌套结构")
+                                elif item.get("base64"):
+                                    # 扁平结构 - base64 字段
+                                    raw_data = item.get("base64", "")
+                                    # 从 mime_type 提取格式 (如 "audio/mpeg" -> "mp3")
+                                    mime_type = item.get("mime_type", "audio/mp3")
+                                    if "mpeg" in mime_type or "mp3" in mime_type:
+                                        audio_format = "mp3"
+                                    elif "wav" in mime_type:
+                                        audio_format = "wav"
+                                    elif "ogg" in mime_type:
+                                        audio_format = "ogg"
+                                    else:
+                                        audio_format = "mp3"
+                                    logger.info(f"[ChatQwenOmni] 使用 base64 字段: mime_type={mime_type}")
                                 else:
-                                    # 扁平结构 - 直接从 item 获取
+                                    # 扁平结构 - data 字段
                                     raw_data = item.get("data", "")
                                     audio_format = item.get("format", "mp3")
-                                    logger.info(f"[ChatQwenOmni] 使用扁平结构: data存在={bool(raw_data)}, format={audio_format}")
+                                    logger.info(f"[ChatQwenOmni] 使用 data 字段")
                                 
-                                logger.info(f"[ChatQwenOmni] 检测到音频: item_type={item_type}, format={audio_format}, data_size={len(raw_data)} chars")
+                                logger.info(f"[ChatQwenOmni] 检测到音频: format={audio_format}, data_size={len(raw_data)} chars")
                                 
                                 # 构建 MIME 类型
                                 mime_type_map = {
