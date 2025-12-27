@@ -308,10 +308,17 @@ class ChatQwenOmni(BaseChatModel):
             body["modalities"] = ["text"]
             logger.info(f"[ChatQwenOmni] 检测到音频输入，添加 modalities=[\"text\"]")
         
-        # 添加工具
-        openai_tools = self._convert_tools_to_openai_format(tools)
-        if openai_tools:
-            body["tools"] = openai_tools
+        # 添加工具（优先使用传入的 tools，否则使用 bind_tools 绑定的工具）
+        tools_to_use = tools
+        if not tools_to_use and self._bound_tools:
+            tools_to_use = self._bound_tools
+            logger.debug(f"[ChatQwenOmni] 使用绑定的工具: {len(tools_to_use)} 个")
+        
+        if tools_to_use:
+            openai_tools = self._convert_tools_to_openai_format(tools_to_use) if not isinstance(tools_to_use[0], dict) else tools_to_use
+            if openai_tools:
+                body["tools"] = openai_tools
+                logger.debug(f"[ChatQwenOmni] 添加工具到请求: {len(openai_tools)} 个")
         
         # 流式选项
         if stream:

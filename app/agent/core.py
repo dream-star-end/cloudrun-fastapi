@@ -1121,8 +1121,6 @@ class LearningAgent:
                     llm_type = "ChatQwenOmni" if is_qwen_omni_llm else "ChatGeminiCustom"
                     logger.info(f"[LearningAgent] 使用 {llm_type} 直接处理音频")
                     voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
-                    # 发送提示事件（告知用户正在处理音频）
-                    yield {"type": "thinking", "content": "正在处理语音..."}
                 else:
                     # ChatOpenAI 不支持 input_audio 内容类型，需要先转录
                     logger.info("[LearningAgent] 使用转录模式处理语音")

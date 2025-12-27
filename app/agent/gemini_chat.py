@@ -286,10 +286,17 @@ class ChatGeminiCustom(BaseChatModel):
         if system_instruction:
             body["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         
-        # 添加工具
-        gemini_tools = self._convert_tools_to_gemini_format(tools)
-        if gemini_tools:
-            body["tools"] = gemini_tools
+        # 添加工具（优先使用传入的 tools，否则使用 bind_tools 绑定的工具）
+        tools_to_use = tools
+        if not tools_to_use and self._bound_tools:
+            tools_to_use = self._bound_tools
+            logger.debug(f"[ChatGeminiCustom] 使用绑定的工具: {len(tools_to_use)} 个")
+        
+        if tools_to_use:
+            gemini_tools = self._convert_tools_to_gemini_format(tools_to_use)
+            if gemini_tools:
+                body["tools"] = gemini_tools
+                logger.debug(f"[ChatGeminiCustom] 添加工具到请求: {len(gemini_tools)} 个")
         
         return body
     
