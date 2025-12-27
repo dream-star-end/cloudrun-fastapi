@@ -991,10 +991,9 @@ class LearningAgent:
         # 构建消息列表
         messages = [HumanMessage(content=content)]
         
-        # 如果有系统提示，添加上下文
-        if input_data.get("user_profile"):
-            system_content = self._build_system_message(input_data)
-            messages.insert(0, SystemMessage(content=system_content))
+        # 始终添加系统消息（确保 AI 用中文回复、遵循行为准则）
+        system_content = self._build_system_message(input_data)
+        messages.insert(0, SystemMessage(content=system_content))
         
         # 执行 Agent
         result = await self.agent.ainvoke(
@@ -1151,9 +1150,9 @@ class LearningAgent:
         
         # 构建消息
         messages = [HumanMessage(content=content)]
-        if input_data.get("user_profile"):
-            system_content = self._build_system_message(input_data)
-            messages.insert(0, SystemMessage(content=system_content))
+        # 始终添加系统消息（确保 AI 用中文回复、遵循行为准则）
+        system_content = self._build_system_message(input_data)
+        messages.insert(0, SystemMessage(content=system_content))
         
         full_response = ""
         current_tool_calls = {}  # 追踪当前工具调用
