@@ -167,9 +167,23 @@ class ChatGeminiCustom(BaseChatModel):
                             elif item.get("type") == "input_audio":
                                 # 音频输入
                                 audio_data = item.get("input_audio", {})
+                                audio_format = audio_data.get('format', 'mp3')
+                                # 转换为正确的 MIME 类型
+                                # mp3 -> audio/mpeg, wav -> audio/wav, etc.
+                                mime_type_map = {
+                                    "mp3": "audio/mpeg",
+                                    "mpeg": "audio/mpeg",
+                                    "wav": "audio/wav",
+                                    "ogg": "audio/ogg",
+                                    "m4a": "audio/mp4",
+                                    "aac": "audio/aac",
+                                    "flac": "audio/flac",
+                                    "webm": "audio/webm",
+                                }
+                                mime_type = mime_type_map.get(audio_format.lower(), f"audio/{audio_format}")
                                 parts.append({
                                     "inline_data": {
-                                        "mime_type": f"audio/{audio_data.get('format', 'mp3')}",
+                                        "mime_type": mime_type,
                                         "data": audio_data.get("data", ""),
                                     }
                                 })

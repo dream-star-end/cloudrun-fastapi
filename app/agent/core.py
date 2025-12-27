@@ -429,10 +429,14 @@ class LearningAgent:
                 content_parts.append({"type": "text", "text": combined_text})
             elif has_audio:
                 # 如果只有音频没有文本，添加默认提示
-                content_parts.append({"type": "text", "text": "请理解并回复这段语音消息。"})
+                # 明确要求用中文回复，并告诉模型这是语音输入
+                content_parts.append({
+                    "type": "text", 
+                    "text": "这是用户发送的语音消息，请先听懂语音内容，然后用中文回复用户的问题或请求。"
+                })
             else:
                 # 如果只有图片没有文本，添加默认提示
-                content_parts.append({"type": "text", "text": "请分析这张图片的内容。"})
+                content_parts.append({"type": "text", "text": "请用中文分析这张图片的内容。"})
             
             # 添加图片部分
             if image_url:
