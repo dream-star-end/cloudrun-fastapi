@@ -135,12 +135,16 @@ class ChatQwenOmni(BaseChatModel):
                         elif isinstance(item, dict):
                             if item.get("type") == "text":
                                 content_parts.append({"type": "text", "text": item.get("text", "")})
-                            elif item.get("type") == "input_audio":
-                                # 处理音频输入 - Qwen-Omni 使用 input_audio 格式
-                                # 正确格式: {"type": "input_audio", "input_audio": {"data": "data:audio/wav;base64,...", "format": "wav"}}
-                                audio_data = item.get("input_audio", {})
+                            elif item.get("type") in ("input_audio", "audio"):
+                                # 处理音频输入 - 同时支持 input_audio 和 audio 两种格式
+                                # input_audio 格式: {"type": "input_audio", "input_audio": {"data": "...", "format": "mp3"}}
+                                # audio 格式: {"type": "audio", "audio": {"data": "...", "format": "mp3"}}
+                                item_type = item.get("type")
+                                audio_data = item.get("input_audio") or item.get("audio", {})
                                 raw_data = audio_data.get("data", "")
                                 audio_format = audio_data.get("format", "mp3")
+                                
+                                logger.info(f"[ChatQwenOmni] 检测到音频: item_type={item_type}, format={audio_format}, data_size={len(raw_data)} chars")
                                 
                                 # 构建 MIME 类型
                                 mime_type_map = {
@@ -158,7 +162,7 @@ class ChatQwenOmni(BaseChatModel):
                                 else:
                                     audio_data_url = f"data:{mime_type};base64,{raw_data}"
                                 
-                                # Qwen-Omni 格式：保持 input_audio 结构，但 data 要是完整的 data URL
+                                # Qwen-Omni 格式：使用 input_audio 结构，data 是完整的 data URL
                                 content_parts.append({
                                     "type": "input_audio",
                                     "input_audio": {
@@ -166,7 +170,7 @@ class ChatQwenOmni(BaseChatModel):
                                         "format": audio_format,
                                     }
                                 })
-                                logger.info(f"[ChatQwenOmni] 添加音频: format={audio_format}, mime_type={mime_type}, data_size={len(raw_data)} chars")
+                                logger.info(f"[ChatQwenOmni] 添加音频到请求: mime_type={mime_type}, data_url_prefix={audio_data_url[:50]}...")
                             elif item.get("type") == "image_url":
                                 # 图片也支持
                                 content_parts.append(item)
@@ -283,7 +287,7 @@ class ChatQwenOmni(BaseChatModel):
             content = msg.get("content")
             if isinstance(content, list):
                 for item in content:
-                    if isinstance(item, dict) and item.get("type") == "input_audio":
+                    if isinstance(item, dict) and item.get("type") in ("input_audio", "audio"):
                         return True
         return False
     
