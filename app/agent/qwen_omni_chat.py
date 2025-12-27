@@ -340,12 +340,12 @@ class ChatQwenOmni(BaseChatModel):
         - WAV: UklGR (RIFF header)
         - OGG: T2dn (OggS header)
         - FLAC: ZkxhQ (fLaC header)
-        - AAC: //vQ or AAAA (AAC frame)
+        - AAC/M4A: AAAA, //vQ (AAC raw) or AAAE, AAAF, AAAG (ftyp box for M4A)
         """
-        if not base64_data or len(base64_data) < 8:
+        if not base64_data or len(base64_data) < 12:
             return None
         
-        prefix = base64_data[:8]
+        prefix = base64_data[:12]
         
         # WebM/Matroska (EBML header)
         if prefix.startswith("GkXfo"):
@@ -371,8 +371,15 @@ class ChatQwenOmni(BaseChatModel):
         if prefix.startswith("ZkxhQ"):
             return "flac"
         
-        # AAC
-        if prefix.startswith("//vQ") or prefix.startswith("AAAA"):
+        # M4A/AAC (ISO Base Media File Format - ftyp box)
+        # Base64 of "ftyp" starts with various patterns depending on box size
+        # Common patterns: AAAAG (size 0x18), AAAAF (size 0x14), AAAE (size 0x10)
+        # Also check for "ftypM4A" or "ftypisom" in the base64
+        if any(prefix.startswith(p) for p in ["AAAA", "AAAB", "AAAC", "AAAD", "AAAE", "AAAF", "AAAG", "AAAI"]):
+            return "m4a"
+        
+        # AAC raw (ADTS header)
+        if prefix.startswith("//vQ") or prefix.startswith("//tQ"):
             return "aac"
         
         return None
