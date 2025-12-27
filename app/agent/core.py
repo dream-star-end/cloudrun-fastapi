@@ -457,13 +457,20 @@ class LearningAgent:
             
             # 添加文本部分
             if combined_text:
-                content_parts.append({"type": "text", "text": combined_text})
+                # 如果有用户文本，同时也有音频，需要说明音频是用户的语音输入
+                if has_audio:
+                    content_parts.append({
+                        "type": "text", 
+                        "text": f"[用户语音消息，请理解并回复]\n{combined_text}"
+                    })
+                else:
+                    content_parts.append({"type": "text", "text": combined_text})
             elif has_audio:
-                # 如果只有音频没有文本，添加默认提示
-                # 告诉模型直接理解音频内容并回复，不要声称自己不能听语音
+                # 如果只有音频没有文本，添加明确的提示
+                # 告诉模型这是用户的语音消息，应该像处理普通消息一样处理
                 content_parts.append({
                     "type": "text", 
-                    "text": "（音频已附带）请直接理解音频中用户说的话，并用中文回复。不要说你无法听到语音或需要文字输入。"
+                    "text": "[用户发送了语音消息] 请直接理解语音内容，并像处理普通文字消息一样回复用户的请求。如果用户请求查看数据或执行操作，请使用相应的工具。"
                 })
             else:
                 # 如果只有图片没有文本，添加默认提示
@@ -651,7 +658,7 @@ class LearningAgent:
         import base64
         from ..config import get_http_client_kwargs
         
-        logger.info(f"[LearningAgent] 下载音频: {voice_url[:50]}...")
+        logger.info(f"[LearningAgent] 下载音频: {voice_url[:80]}...")
         
         async with httpx.AsyncClient(**get_http_client_kwargs(60.0)) as client:
             audio_response = await client.get(voice_url, follow_redirects=True)
@@ -661,22 +668,102 @@ class LearningAgent:
             audio_data = audio_response.content
             content_type = audio_response.headers.get("content-type", "")
             
-            # 推断文件格式
-            if "mp3" in content_type or voice_url.endswith(".mp3"):
-                audio_format = "mp3"
-            elif "wav" in content_type or voice_url.endswith(".wav"):
-                audio_format = "wav"
-            elif "silk" in voice_url or "amr" in content_type:
-                audio_format = "mp3"
-            else:
-                audio_format = "mp3"
+            logger.info(f"[LearningAgent] 音频响应: content_type={content_type}, size={len(audio_data)} bytes")
+            
+            # 通过文件头检测真实格式
+            audio_format = self._detect_audio_format_by_header(audio_data)
+            
+            if not audio_format:
+                # 无法通过文件头检测，使用 URL 和 Content-Type 推断
+                if "mp3" in content_type or voice_url.endswith(".mp3"):
+                    audio_format = "mp3"
+                elif "wav" in content_type or voice_url.endswith(".wav"):
+                    audio_format = "wav"
+                elif "m4a" in content_type or voice_url.endswith(".m4a"):
+                    audio_format = "m4a"
+                elif "ogg" in content_type or voice_url.endswith(".ogg"):
+                    audio_format = "ogg"
+                elif "webm" in content_type or voice_url.endswith(".webm"):
+                    audio_format = "webm"
+                elif "silk" in voice_url.lower():
+                    # 微信 silk 格式，尝试作为 mp3 处理（可能会失败）
+                    audio_format = "silk"
+                    logger.warning("[LearningAgent] 检测到 silk 格式，模型可能无法正确解析")
+                elif "amr" in content_type.lower():
+                    audio_format = "amr"
+                    logger.warning("[LearningAgent] 检测到 amr 格式，模型可能无法正确解析")
+                else:
+                    audio_format = "mp3"  # 默认尝试 mp3
             
             # Base64 编码
             audio_base64 = base64.b64encode(audio_data).decode("utf-8")
             
-            logger.info(f"[LearningAgent] 音频下载完成: format={audio_format}, size={len(audio_data)} bytes")
+            logger.info(f"[LearningAgent] 音频下载完成: detected_format={audio_format}, size={len(audio_data)} bytes, base64_len={len(audio_base64)}")
             
             return audio_base64, audio_format
+    
+    def _detect_audio_format_by_header(self, audio_data: bytes) -> Optional[str]:
+        """
+        通过文件头（magic bytes）检测音频的真实格式
+        
+        常见音频格式的文件头：
+        - MP3 with ID3: 49 44 33 (ID3)
+        - MP3 without ID3: FF FB, FF FA, FF F3 (MPEG frame sync)
+        - WAV: 52 49 46 46 (RIFF)
+        - OGG: 4F 67 67 53 (OggS)
+        - FLAC: 66 4C 61 43 (fLaC)
+        - M4A/AAC: 00 00 00 xx 66 74 79 70 (ftyp box)
+        - WebM: 1A 45 DF A3 (EBML)
+        - AMR: 23 21 41 4D 52 (#!AMR)
+        - SILK: 02 23 21 53 49 4C 4B (微信私有格式)
+        
+        Returns:
+            检测到的格式，如 "mp3", "wav", "ogg" 等，未知返回 None
+        """
+        if not audio_data or len(audio_data) < 12:
+            return None
+        
+        # 检查文件头
+        header = audio_data[:12]
+        
+        # MP3 with ID3 tag
+        if header[:3] == b'ID3':
+            return "mp3"
+        
+        # MP3 MPEG frame sync (无 ID3)
+        if header[:2] in (b'\xff\xfb', b'\xff\xfa', b'\xff\xf3', b'\xff\xf2'):
+            return "mp3"
+        
+        # WAV (RIFF header)
+        if header[:4] == b'RIFF' and header[8:12] == b'WAVE':
+            return "wav"
+        
+        # OGG (OggS header)
+        if header[:4] == b'OggS':
+            return "ogg"
+        
+        # FLAC (fLaC header)
+        if header[:4] == b'fLaC':
+            return "flac"
+        
+        # WebM/Matroska (EBML header)
+        if header[:4] == b'\x1a\x45\xdf\xa3':
+            return "webm"
+        
+        # M4A/AAC (ISO Base Media File Format - ftyp box)
+        if header[4:8] == b'ftyp':
+            return "m4a"
+        
+        # AMR
+        if header[:6] == b'#!AMR\n' or header[:6] == b'#!AMR-':
+            return "amr"
+        
+        # SILK (微信私有格式)
+        # SILK v3 header: 02 23 21 53 49 4C 4B
+        if header[1:7] == b'#!SILK' or b'SILK' in header[:20]:
+            return "silk"
+        
+        return None
     
     async def _transcribe_via_gemini_native_api(
         self,
@@ -969,18 +1056,27 @@ class LearningAgent:
                 api_format = voice_config.get("api_format", "openai")
                 
                 # 检查模型是否同时支持 text 和 voice（可以直接处理音频）
-                supports_direct_audio = "text" in model_types and "voice" in model_types
+                # 用户配置的 model_types 标签
+                supports_direct_audio_by_config = "text" in model_types and "voice" in model_types
                 
-                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}, api_format={api_format}, is_gemini_llm={is_gemini_llm}, is_qwen_omni_llm={is_qwen_omni_llm}")
+                # 如果 LLM 本身是支持音频的类型（通过模型名识别），就自动启用直接音频模式
+                supports_direct_audio = supports_direct_audio_by_config or supports_direct_audio_llm
+                
+                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio_by_config={supports_direct_audio_by_config}, supports_direct_audio_llm={supports_direct_audio_llm}, final={supports_direct_audio}")
                 
                 # ChatGeminiCustom 或 ChatQwenOmni 支持直接处理音频，不需要转录
                 if supports_direct_audio_llm and supports_direct_audio:
                     # 下载音频并编码为 base64，直接发送给模型
                     llm_type = "ChatQwenOmni" if is_qwen_omni_llm else "ChatGeminiCustom"
                     logger.info(f"[LearningAgent] 使用 {llm_type} 直接处理音频")
-                    voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
-                else:
-                    # ChatOpenAI 不支持 input_audio 内容类型，需要先转录
+                    try:
+                        voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
+                    except Exception as e:
+                        logger.error(f"[LearningAgent] 音频下载失败，尝试转录: {e}")
+                        supports_direct_audio = False
+                
+                # 如果不支持直接音频或音频处理失败，使用转录模式
+                if not supports_direct_audio or (supports_direct_audio_llm and voice_base64 is None):
                     logger.info("[LearningAgent] 使用转录模式处理语音")
                     try:
                         transcribed = await self._transcribe_voice(multimodal["voice_url"])
@@ -1013,6 +1109,8 @@ class LearningAgent:
             # 获取文本模型（传入 None 表示纯文本消息）
             llm = await self._get_llm_for_message(None)
             logger.info(f"[LearningAgent] 切换到文本模型: {self._current_model_info}")
+            # 切换后需要重新检查是否支持多模态
+            supports_direct_audio_llm = False
         
         # 创建/更新 Agent（使用选定的 LLM）
         self._create_agent(llm)
@@ -1026,8 +1124,12 @@ class LearningAgent:
         # 构建消息列表
         messages = [HumanMessage(content=content)]
         
+        # 判断当前是否实际使用多模态能力（直接发送音频或图片）
+        # 只有在直接发送音频/图片给模型时，才告诉模型它有多模态能力
+        actual_multimodal = voice_base64 is not None or (has_image and (is_multimodal_model or supports_direct_audio_llm))
+        
         # 始终添加系统消息（确保 AI 用中文回复、遵循行为准则）
-        system_content = self._build_system_message(input_data)
+        system_content = self._build_system_message(input_data, supports_multimodal=actual_multimodal)
         messages.insert(0, SystemMessage(content=system_content))
         
         # 执行 Agent
@@ -1121,17 +1223,29 @@ class LearningAgent:
                 api_format = voice_config.get("api_format", "openai")
                 
                 # 检查模型是否同时支持 text 和 voice（可以直接处理音频）
-                supports_direct_audio = "text" in model_types and "voice" in model_types
+                # 用户配置的 model_types 标签
+                supports_direct_audio_by_config = "text" in model_types and "voice" in model_types
                 
-                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio={supports_direct_audio}, api_format={api_format}, is_gemini_llm={is_gemini_llm}, is_qwen_omni_llm={is_qwen_omni_llm}")
+                # 如果 LLM 本身是支持音频的类型（通过模型名识别），就自动启用直接音频模式
+                # 这样即使用户没有正确配置 model_types，也能正常工作
+                supports_direct_audio = supports_direct_audio_by_config or supports_direct_audio_llm
+                
+                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio_by_config={supports_direct_audio_by_config}, supports_direct_audio_llm={supports_direct_audio_llm}, final={supports_direct_audio}")
                 
                 # ChatGeminiCustom 或 ChatQwenOmni 支持直接处理音频，不需要转录
                 if supports_direct_audio_llm and supports_direct_audio:
                     # 下载音频并编码为 base64，直接发送给模型
                     llm_type = "ChatQwenOmni" if is_qwen_omni_llm else "ChatGeminiCustom"
                     logger.info(f"[LearningAgent] 使用 {llm_type} 直接处理音频")
-                    voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
-                else:
+                    try:
+                        voice_base64, voice_format = await self._download_and_encode_audio(multimodal["voice_url"])
+                    except Exception as e:
+                        # 音频下载失败，降级到转录模式
+                        logger.error(f"[LearningAgent] 音频下载失败，尝试转录: {e}")
+                        supports_direct_audio = False
+                
+                # 如果不支持直接音频或音频处理失败，使用转录模式
+                if not supports_direct_audio or (supports_direct_audio_llm and voice_base64 is None):
                     # ChatOpenAI 不支持 input_audio 内容类型，需要先转录
                     logger.info("[LearningAgent] 使用转录模式处理语音")
                     try:
@@ -1169,6 +1283,8 @@ class LearningAgent:
             # 获取文本模型（传入 None 表示纯文本消息）
             llm = await self._get_llm_for_message(None)
             logger.info(f"[LearningAgent] 切换到文本模型: {self._current_model_info}")
+            # 切换后需要重新检查是否支持多模态
+            supports_direct_audio_llm = False
         
         # 创建/更新 Agent（使用选定的 LLM）
         self._create_agent(llm)
@@ -1186,10 +1302,14 @@ class LearningAgent:
         # 配置
         config = {"configurable": {"thread_id": self.user_id}}
         
+        # 判断当前是否实际使用多模态能力（直接发送音频或图片）
+        # 只有在直接发送音频/图片给模型时，才告诉模型它有多模态能力
+        actual_multimodal = voice_base64 is not None or (has_image and (is_multimodal_model or supports_direct_audio_llm))
+        
         # 构建消息
         messages = [HumanMessage(content=content)]
         # 始终添加系统消息（确保 AI 用中文回复、遵循行为准则）
-        system_content = self._build_system_message(input_data)
+        system_content = self._build_system_message(input_data, supports_multimodal=actual_multimodal)
         messages.insert(0, SystemMessage(content=system_content))
         
         full_response = ""
@@ -1391,19 +1511,50 @@ class LearningAgent:
         else:
             return {"success": True, "data": str(output)}
     
-    def _build_system_message(self, input_data: Dict[str, Any]) -> str:
-        """构建系统消息内容"""
+    def _build_system_message(
+        self, 
+        input_data: Dict[str, Any],
+        supports_multimodal: bool = False,
+    ) -> str:
+        """
+        构建系统消息内容
+        
+        Args:
+            input_data: 输入数据，包含用户画像、对话摘要等
+            supports_multimodal: 当前模型是否支持多模态（图片/音频）
+        """
         template = (
             LEARNING_COACH_PROMPT if self.mode == "coach"
             else READING_COMPANION_PROMPT
         )
         
-        return template.format(
+        content = template.format(
             user_profile=input_data.get("user_profile", "新用户"),
             conversation_summary=input_data.get("conversation_summary", "新对话"),
             current_time=input_data.get("current_time", ""),
             reading_context=input_data.get("reading_context", "无"),
         )
+        
+        # 如果当前模型不支持多模态，移除关于多模态能力的描述
+        # 避免模型产生困惑，以为自己应该能处理但实际无法处理
+        if not supports_multimodal:
+            # 替换多模态能力描述为更准确的说明
+            # 注意：这里使用与系统提示词中完全相同的文本，包括中文引号
+            multimodal_section = (
+                '## 多模态能力\n'
+                '- 你可以**直接理解用户发送的语音消息**，无需转录为文字\n'
+                '- 你可以**直接识别和分析图片内容**\n'
+                '- 当用户发送语音或图片时，请直接理解并回复，不要说"无法听到语音"或"无法看到图片"'
+            )
+            text_only_section = (
+                '## 输入处理\n'
+                '- 用户的语音消息已自动转录为文字，你收到的就是转录后的文字内容\n'
+                '- 用户的图片会通过工具识别，你会收到识别结果\n'
+                '- 请直接根据收到的文字内容回复，不要说"无法听到语音"或"无法看到图片"'
+            )
+            content = content.replace(multimodal_section, text_only_section)
+        
+        return content
     
     def _prepare_input(
         self,
