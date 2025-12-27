@@ -136,15 +136,25 @@ class ChatQwenOmni(BaseChatModel):
                             if item.get("type") == "text":
                                 content_parts.append({"type": "text", "text": item.get("text", "")})
                             elif item.get("type") in ("input_audio", "audio"):
-                                # 处理音频输入 - 同时支持 input_audio 和 audio 两种格式
-                                # input_audio 格式: {"type": "input_audio", "input_audio": {"data": "...", "format": "mp3"}}
-                                # audio 格式: {"type": "audio", "audio": {"data": "...", "format": "mp3"}}
+                                # 处理音频输入 - 同时支持多种格式
+                                # 格式1 (嵌套): {"type": "input_audio", "input_audio": {"data": "...", "format": "mp3"}}
+                                # 格式2 (嵌套): {"type": "audio", "audio": {"data": "...", "format": "mp3"}}
+                                # 格式3 (扁平): {"type": "audio", "data": "...", "format": "mp3"}
                                 item_type = item.get("type")
-                                audio_data = item.get("input_audio") or item.get("audio", {})
-                                raw_data = audio_data.get("data", "")
-                                audio_format = audio_data.get("format", "mp3")
                                 
-                                logger.info(f"[ChatQwenOmni] 检测到音频: item_type={item_type}, format={audio_format}, data_size={len(raw_data)} chars")
+                                # 尝试从嵌套结构获取
+                                audio_data = item.get("input_audio") or item.get("audio")
+                                
+                                if audio_data and isinstance(audio_data, dict):
+                                    # 嵌套结构
+                                    raw_data = audio_data.get("data", "")
+                                    audio_format = audio_data.get("format", "mp3")
+                                else:
+                                    # 扁平结构 - 直接从 item 获取
+                                    raw_data = item.get("data", "")
+                                    audio_format = item.get("format", "mp3")
+                                
+                                logger.info(f"[ChatQwenOmni] 检测到音频: item_type={item_type}, format={audio_format}, data_size={len(raw_data)} chars, 结构={'嵌套' if audio_data else '扁平'}")
                                 
                                 # 构建 MIME 类型
                                 mime_type_map = {
