@@ -2,9 +2,15 @@
 模型配置服务模块
 负责从云数据库读取用户的模型配置，支持缓存和配置合并
 
+默认模型配置：
+- 文本模型：DeepSeek，API Key 和模型名称从环境变量读取
+- 视觉模型：类 OpenAI 接口（https://api.gptsapi.net/v1），API Key 和模型名称从环境变量读取
+- 语音模型：通义千问，API Key 和模型名称从环境变量读取
+
 Requirements: 2.1, 2.2, 2.3, 2.4, 2.5
 """
 
+import os
 import logging
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -26,7 +32,41 @@ class ModelConfigService:
     _cache: Dict[str, tuple] = {}
     _cache_ttl = timedelta(minutes=5)
     
-    # 系统默认配置
+    # 系统默认配置（从环境变量读取）
+    # - 文本模型：使用 DeepSeek
+    # - 视觉/多模态模型：使用类 OpenAI 接口 (https://api.gptsapi.net/v1)
+    # - 语音模型：使用通义千问
+    @classmethod
+    def _get_default_config(cls) -> Dict[str, Any]:
+        """获取系统默认配置，从环境变量读取"""
+        return {
+            "text": {
+                "platform": "deepseek",
+                "model": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+                "base_url": "https://api.deepseek.com/v1",
+                "api_key": os.getenv("DEEPSEEK_API_KEY", ""),
+            },
+            "vision": {
+                "platform": "openai_compatible",
+                "model": os.getenv("VISION_MODEL", "gpt-4o"),
+                "base_url": "https://api.gptsapi.net/v1",
+                "api_key": os.getenv("VISION_API_KEY", ""),
+            },
+            "voice": {
+                "platform": "qwen",
+                "model": os.getenv("QWEN_VOICE_MODEL", "qwen-audio-turbo"),
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "api_key": os.getenv("QWEN_API_KEY", ""),
+            },
+            "multimodal": {
+                "platform": "openai_compatible",
+                "model": os.getenv("VISION_MODEL", "gpt-4o"),
+                "base_url": "https://api.gptsapi.net/v1",
+                "api_key": os.getenv("VISION_API_KEY", ""),
+            },
+        }
+    
+    # 保留静态 DEFAULT_CONFIG 用于向后兼容
     DEFAULT_CONFIG = {
         "text": {
             "platform": "deepseek",
@@ -34,19 +74,19 @@ class ModelConfigService:
             "base_url": "https://api.deepseek.com/v1",
         },
         "vision": {
-            "platform": "deepseek",
-            "model": "deepseek-chat",
-            "base_url": "https://api.deepseek.com/v1",
+            "platform": "openai_compatible",
+            "model": "gpt-4o",
+            "base_url": "https://api.gptsapi.net/v1",
         },
         "voice": {
-            "platform": "deepseek",
-            "model": "deepseek-chat",
-            "base_url": "https://api.deepseek.com/v1",
+            "platform": "qwen",
+            "model": "qwen-audio-turbo",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         },
         "multimodal": {
-            "platform": "deepseek",
-            "model": "deepseek-chat",
-            "base_url": "https://api.deepseek.com/v1",
+            "platform": "openai_compatible",
+            "model": "gpt-4o",
+            "base_url": "https://api.gptsapi.net/v1",
         },
     }
     
@@ -220,20 +260,33 @@ class ModelConfigService:
                     "api_format": api_format,  # API 格式
                 }
         
-        # 用户未配置或配置无效，使用系统默认
-        logger.info(f"[ModelConfigService] 使用系统默认: type={model_type}")
-        system_default = cls.DEFAULT_CONFIG.get(model_type, cls.DEFAULT_CONFIG["text"])
+        # 用户未配置或配置无效，使用系统默认（从环境变量读取）
+        default_config = cls._get_default_config()
+        system_default = default_config.get(model_type, default_config["text"])
         
-        # 系统默认配置不包含 API Key，需要用户自行配置
-        # 返回空 api_key，让调用方处理（如显示配置提示）
+        # 从环境变量读取的 API Key
+        api_key = system_default.get("api_key", "")
+        
+        if api_key:
+            logger.info(f"[ModelConfigService] 使用系统默认（环境变量）: type={model_type}, platform={system_default['platform']}, model={system_default['model']}")
+        else:
+            logger.info(f"[ModelConfigService] 使用系统默认（无 API Key）: type={model_type}")
+        
+        # 确定模型支持的输入类型
+        model_types = ["text"]
+        if model_type in ["vision", "multimodal"]:
+            model_types = ["text", "image"]
+        elif model_type == "voice":
+            model_types = ["text", "voice"]
+        
         return {
             "platform": system_default["platform"],
             "model": system_default["model"],
             "model_name": system_default["model"],
             "base_url": system_default["base_url"],
-            "api_key": "",  # 系统默认不提供 API Key，需要用户配置
+            "api_key": api_key,  # 从环境变量读取的 API Key
             "is_user_config": False,
-            "model_types": ["text"],  # 系统默认只支持文本
+            "model_types": model_types,
             "api_format": "openai",  # 系统默认使用 OpenAI 格式
         }
     

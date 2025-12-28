@@ -6,16 +6,24 @@
 
 ### AI 模型配置
 
+> 说明：当用户未配置自己的模型时，系统会使用以下默认配置。
+
 ```bash
-# DeepSeek API（文本模型）
+# ========== 文本模型（DeepSeek）==========
+# 用于普通对话、问答等文本任务
 DEEPSEEK_API_KEY=sk-your-deepseek-api-key
-DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 DEEPSEEK_MODEL=deepseek-chat
 
-# 视觉模型 API
+# ========== 视觉/多模态模型（类 OpenAI 接口）==========
+# 用于图片识别、多模态任务
+# 默认使用 https://api.gptsapi.net/v1 作为 base_url
 VISION_API_KEY=sk-your-vision-api-key
-VISION_BASE_URL=https://api.openai.com/v1
-VISION_MODEL=gpt-5.1
+VISION_MODEL=gpt-4o
+
+# ========== 语音模型（通义千问）==========
+# 用于语音对话、语音识别等任务
+QWEN_API_KEY=sk-your-qwen-api-key
+QWEN_VOICE_MODEL=qwen-audio-turbo
 ```
 
 ### 搜索配置

@@ -21,9 +21,13 @@ class AIService:
         """
         获取模型配置的统一方法
         
+        优先级：
+        1. 用户在数据库中的配置
+        2. 系统默认配置（从环境变量读取）
+        
         Args:
-            openid: 用户 openid，为 None 时抛出错误
-            model_type: 模型类型 (text/multimodal/vision)
+            openid: 用户 openid，可以为 None（使用系统默认）
+            model_type: 模型类型 (text/multimodal/vision/voice)
         
         Returns:
             包含 base_url, api_key, model 的配置字典
@@ -34,23 +38,39 @@ class AIService:
         import logging
         logger = logging.getLogger(__name__)
         
-        if not openid:
-            raise ValueError("请先在「个人中心 → 模型配置」中配置 AI 模型的 API Key")
-        
+        # 尝试获取用户配置或系统默认配置
         try:
-            user_model = await ModelConfigService.get_model_for_type(openid, model_type)
+            if openid:
+                user_model = await ModelConfigService.get_model_for_type(openid, model_type)
+            else:
+                # 无 openid 时直接使用系统默认
+                user_model = await ModelConfigService.get_model_for_type("", model_type)
+            
             if user_model.get("api_key"):
-                logger.info(f"[AIService] 使用用户配置: openid={openid[:8]}***, type={model_type}, platform={user_model.get('platform')}, model={user_model.get('model')}")
+                if user_model.get("is_user_config"):
+                    logger.info(f"[AIService] 使用用户配置: openid={openid[:8] if openid else 'N/A'}***, type={model_type}, platform={user_model.get('platform')}, model={user_model.get('model')}")
+                else:
+                    logger.info(f"[AIService] 使用系统默认配置: type={model_type}, platform={user_model.get('platform')}, model={user_model.get('model')}")
                 return {
                     "base_url": user_model["base_url"],
                     "api_key": user_model["api_key"],
                     "model": user_model["model"],
                 }
         except Exception as e:
-            logger.warning(f"[AIService] 获取用户模型配置失败: {e}")
+            logger.warning(f"[AIService] 获取模型配置失败: {e}")
         
-        # 用户未配置或配置无效
-        raise ValueError("请先在「个人中心 → 模型配置」中配置 AI 模型的 API Key")
+        # 最后尝试从 AI_MODELS 配置获取（向后兼容）
+        fallback_config = AI_MODELS.get(model_type, AI_MODELS.get("text"))
+        if fallback_config and fallback_config.get("api_key"):
+            logger.info(f"[AIService] 使用 AI_MODELS 回退配置: type={model_type}, model={fallback_config.get('model')}")
+            return {
+                "base_url": fallback_config["base_url"],
+                "api_key": fallback_config["api_key"],
+                "model": fallback_config["model"],
+            }
+        
+        # 无可用配置
+        raise ValueError("请先在「个人中心 → 模型配置」中配置 AI 模型的 API Key，或在服务器环境变量中配置默认 API Key")
     
     # 学习教练系统提示词
     COACH_SYSTEM_PROMPT = """你是一位专业、耐心、有爱心的AI学习教练。你的目标是帮助学生高效学习、解答疑惑、制定计划、监督进度。

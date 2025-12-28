@@ -19,17 +19,24 @@ class Settings(BaseSettings):
     APP_VERSION: str = "2.0.0"  # 升级到 Agent 版本
     DEBUG: bool = False
     
-    # DeepSeek AI 配置（默认模型配置，API Key 从用户配置读取）
-    DEEPSEEK_API_BASE: str = "https://api.deepseek.com/v1"  # LangChain 使用 api_base
+    # ========== 默认文本模型配置（DeepSeek）==========
+    # 当用户未配置时使用此默认配置
+    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+    DEEPSEEK_API_BASE: str = "https://api.deepseek.com/v1"
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
-    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
     
-    # DeepSeek 视觉模型
-    DEEPSEEK_VISION_MODEL: str = "deepseek-chat"  # DeepSeek 视觉模型
-    
-    # 视觉模型配置（默认配置，API Key 从用户配置读取）
+    # ========== 默认视觉模型配置（类 OpenAI 接口）==========
+    # 当用户未配置时使用此默认配置
+    VISION_API_KEY: str = os.getenv("VISION_API_KEY", "")
     VISION_BASE_URL: str = "https://api.gptsapi.net/v1"
-    VISION_MODEL: str = "gpt-4o"
+    VISION_MODEL: str = os.getenv("VISION_MODEL", "gpt-4o")
+    
+    # ========== 默认语音模型配置（通义千问）==========
+    # 当用户未配置时使用此默认配置
+    QWEN_API_KEY: str = os.getenv("QWEN_API_KEY", "")
+    QWEN_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    QWEN_VOICE_MODEL: str = os.getenv("QWEN_VOICE_MODEL", "qwen-audio-turbo")
     
     # Tavily 搜索配置
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
@@ -125,22 +132,37 @@ def get_http_client_kwargs(timeout: float = 30.0) -> dict:
     return kwargs
 
 
-# AI 模型配置字典（已废弃，API Key 现在从用户数据库配置读取）
-# 保留此字典仅用于向后兼容，实际使用 ModelConfigService
+# AI 模型配置字典
+# 当用户未配置时使用此默认配置，API Key 从环境变量读取
 AI_MODELS = {
     "text": {
         "base_url": settings.DEEPSEEK_BASE_URL,
         "model": settings.DEEPSEEK_MODEL,
+        "api_key": settings.DEEPSEEK_API_KEY,
         "max_tokens": 4000,
     },
     "vision": {
         "base_url": settings.VISION_BASE_URL,
         "model": settings.VISION_MODEL,
+        "api_key": settings.VISION_API_KEY,
+        "max_tokens": 4000,
+    },
+    "multimodal": {
+        "base_url": settings.VISION_BASE_URL,
+        "model": settings.VISION_MODEL,
+        "api_key": settings.VISION_API_KEY,
+        "max_tokens": 4000,
+    },
+    "voice": {
+        "base_url": settings.QWEN_BASE_URL,
+        "model": settings.QWEN_VOICE_MODEL,
+        "api_key": settings.QWEN_API_KEY,
         "max_tokens": 4000,
     },
     "longtext": {
         "base_url": settings.DEEPSEEK_BASE_URL,
         "model": settings.DEEPSEEK_MODEL,
+        "api_key": settings.DEEPSEEK_API_KEY,
         "max_tokens": 8000,
     },
 }
