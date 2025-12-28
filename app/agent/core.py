@@ -1103,7 +1103,8 @@ class LearningAgent:
         # 语音转录后，如果使用的是 ChatOpenAI，需要重新获取文本模型进行对话
         # 因为语音模型可能使用非 OpenAI 兼容的 API 格式
         # 但如果是 ChatGeminiCustom 或 ChatQwenOmni，则不需要切换（它们本身就支持对话）
-        if did_voice_transcription and not supports_direct_audio_llm:
+        # 修正：如果当前有图片（多模态模式），不要切换回纯文本模型，应保留使用多模态模型
+        if did_voice_transcription and not supports_direct_audio_llm and not has_image:
             logger.info("[LearningAgent] 语音转录完成，重新获取文本模型进行对话")
             # 清除缓存的语音模型 LLM，强制重新获取文本模型
             cache_key = f"{self.user_id}:voice"
@@ -1280,7 +1281,8 @@ class LearningAgent:
         # 语音转录后，如果使用的是 ChatOpenAI，需要重新获取文本模型进行对话
         # 因为语音模型可能使用非 OpenAI 兼容的 API 格式
         # 但如果是 ChatGeminiCustom 或 ChatQwenOmni，则不需要切换（它们本身就支持对话）
-        if did_voice_transcription and not supports_direct_audio_llm:
+        # 修正：如果当前有图片（多模态模式），不要切换回纯文本模型，应保留使用多模态模型
+        if did_voice_transcription and not supports_direct_audio_llm and not has_image:
             logger.info("[LearningAgent] 语音转录完成，重新获取文本模型进行对话")
             # 清除缓存的语音模型 LLM，强制重新获取文本模型
             cache_key = f"{self.user_id}:voice"
