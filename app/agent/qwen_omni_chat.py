@@ -505,12 +505,12 @@ class ChatQwenOmni(BaseChatModel):
                         data_str = line[6:]
                         try:
                             obj = json.loads(data_str)
-                            text, tool_calls = self._extract_from_stream_chunk(obj)
+                            text, tool_call_chunks = self._extract_from_stream_chunk(obj)
                             
-                            if text or tool_calls:
+                            if text or tool_call_chunks:
                                 chunk_kwargs = {"content": text or ""}
-                                if tool_calls:
-                                    chunk_kwargs["tool_calls"] = tool_calls
+                                if tool_call_chunks:
+                                    chunk_kwargs["tool_call_chunks"] = tool_call_chunks
                                 
                                 chunk_msg = AIMessageChunk(**chunk_kwargs)
                                 gen_chunk = ChatGenerationChunk(message=chunk_msg)
@@ -587,7 +587,11 @@ class ChatQwenOmni(BaseChatModel):
         self,
         chunk: Dict[str, Any],
     ) -> tuple[str, Optional[List[Dict[str, Any]]]]:
-        """从流式响应块中提取文本和工具调用"""
+        """
+        从流式响应块中提取文本和工具调用
+        
+        返回: (content, tool_call_chunks)
+        """
         choices = chunk.get("choices", [])
         if not choices:
             return "", None
@@ -595,28 +599,33 @@ class ChatQwenOmni(BaseChatModel):
         delta = choices[0].get("delta", {})
         text = delta.get("content", "") or ""
         
-        # 提取工具调用
+        # 提取工具调用块
         tool_calls_data = delta.get("tool_calls", [])
-        tool_calls = []
-        for tc in tool_calls_data:
-            func = tc.get("function", {})
-            tc_id = tc.get("id", "")
-            tc_name = func.get("name", "")
-            tc_args_str = func.get("arguments", "")
-            
-            if tc_id or tc_name or tc_args_str:
-                try:
-                    args = json.loads(tc_args_str) if tc_args_str else {}
-                except json.JSONDecodeError:
-                    args = {}
-                
-                tool_calls.append({
-                    "id": tc_id,
-                    "name": tc_name,
-                    "args": args,
-                })
+        tool_call_chunks = []
         
-        return text, tool_calls if tool_calls else None
+        for tc in tool_calls_data:
+            # 获取索引、ID、名称和参数片段
+            index = tc.get("index")
+            tc_id = tc.get("id")
+            func = tc.get("function", {})
+            tc_name = func.get("name")
+            tc_args = func.get("arguments")
+            
+            # 构建 tool_call_chunk
+            chunk = {}
+            if tc_name is not None:
+                chunk["name"] = tc_name
+            if tc_args is not None:
+                chunk["args"] = tc_args
+            if tc_id is not None:
+                chunk["id"] = tc_id
+            if index is not None:
+                chunk["index"] = index
+                
+            if chunk:
+                tool_call_chunks.append(chunk)
+        
+        return text, tool_call_chunks if tool_call_chunks else None
     
     def bind_tools(
         self,
