@@ -1228,9 +1228,15 @@ class LearningAgent:
                 
                 # 如果 LLM 本身是支持音频的类型（通过模型名识别），就自动启用直接音频模式
                 # 这样即使用户没有正确配置 model_types，也能正常工作
-                supports_direct_audio = supports_direct_audio_by_config or supports_direct_audio_llm
+                # supports_direct_audio = supports_direct_audio_by_config or supports_direct_audio_llm
                 
-                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio_by_config={supports_direct_audio_by_config}, supports_direct_audio_llm={supports_direct_audio_llm}, final={supports_direct_audio}")
+                # 【临时修改】强制禁用 Qwen-Omni 的直接音频输入功能
+                # 原因：Qwen-Omni 在处理音频流式响应时，可能返回空内容导致 "No generations found in stream" 错误
+                # 或者对某些音频格式（如 webm）支持不佳。
+                # 强制回退到 "转录 + 文本对话" 模式，虽然多了一次 API 调用，但稳定性更高，且能确保工具调用正常。
+                supports_direct_audio = False 
+                
+                logger.info(f"[LearningAgent] 语音模型能力检查: model_types={model_types}, supports_direct_audio_by_config={supports_direct_audio_by_config}, supports_direct_audio_llm={supports_direct_audio_llm}, final={supports_direct_audio} (强制禁用)")
                 
                 # ChatGeminiCustom 或 ChatQwenOmni 支持直接处理音频，不需要转录
                 if supports_direct_audio_llm and supports_direct_audio:
