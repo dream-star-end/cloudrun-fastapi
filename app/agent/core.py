@@ -1636,13 +1636,14 @@ class LearningAgent:
             # 获取默认文本模型
             llm = await self._get_llm_for_message(None)
         
-        analysis_prompt = f"""分析以下对话，提取用户学习相关的洞察：
+        analysis_prompt = f"""分析以下对话，提取用户学习相关的洞察和个人信息：
 
 用户消息: {user_message}
 助手回复: {result.get('output', '')[:500]}
 
 请以 JSON 格式返回洞察（如果没有有价值的洞察返回 null）：
 {{
+    "name": "用户提到的自己的名字/昵称（如有）",
     "learning_style": "用户的学习风格偏好（如有）",
     "knowledge_level": "用户在某领域的知识水平（如有）",
     "interests": ["用户感兴趣的主题（如有）"],

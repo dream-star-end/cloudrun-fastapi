@@ -30,6 +30,7 @@ class AgentMemory:
         self._data: Dict[str, Any] = {
             "messages": [],  # 对话历史
             "user_profile": {  # 用户画像
+                "name": None,  # 用户称呼
                 "created_at": datetime.now().isoformat(),
                 "learning_goals": [],
                 "knowledge_levels": {},
@@ -239,6 +240,9 @@ class AgentMemory:
         
         parts = []
         
+        if profile.get("name"):
+            parts.append(f"用户称呼: {profile['name']}")
+
         if profile.get("learning_goals"):
             parts.append(f"学习目标: {', '.join(profile['learning_goals'][:3])}")
         
@@ -268,6 +272,11 @@ class AgentMemory:
         
         updated = False
         
+        # 更新用户称呼
+        if insights.get("name"):
+            profile["name"] = insights["name"]
+            updated = True
+
         # 更新学习风格
         if insights.get("learning_style"):
             profile["learning_style"] = insights["learning_style"]
