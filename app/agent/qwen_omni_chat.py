@@ -551,10 +551,6 @@ class ChatQwenOmni(BaseChatModel):
                 chunk_count = 0
                 
                 async for line in response.aiter_lines():
-                    # 调试日志：打印原始流数据
-                    if len(line) > 0:
-                        logger.info(f"[ChatQwenOmni] RAW STREAM LINE: {line[:200]}")
-                        
                     line = line.strip()
                     if not line or line == "data: [DONE]":
                         continue

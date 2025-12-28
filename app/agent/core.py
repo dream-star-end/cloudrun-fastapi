@@ -1554,6 +1554,19 @@ class LearningAgent:
             )
             content = content.replace(multimodal_section, text_only_section)
         
+        # 针对支持多模态的模型（如 Qwen-Omni），强化回复指令
+        # 防止模型只输出 JSON 分析结果而不回复用户
+        if supports_multimodal:
+            instruction = (
+                '\n\n## 语音/图片回复规则\n'
+                '- 当前用户正在使用语音或图片输入。\n'
+                '- **请务必使用自然语言直接回复用户**，就像在进行语音通话一样。\n'
+                '- **禁止**在回复中直接输出 JSON 数据（如用户画像分析结果）。\n'
+                '- 如果需要更新用户画像，请在后台调用相应的工具，不要让用户看到 JSON。\n'
+                '- 你的首要任务是回应用户的话语内容。'
+            )
+            content += instruction
+        
         return content
     
     def _prepare_input(
