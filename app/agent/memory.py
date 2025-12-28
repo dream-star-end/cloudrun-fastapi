@@ -351,3 +351,26 @@ class AgentMemory:
 
     # ==================== 兼容性方法 ====================
     # 移除 export_data/import_data 或做空实现，因为现在依赖数据库
+
+
+class MemoryManager:
+    """
+    全局记忆管理器
+    管理所有用户的 AgentMemory 实例（缓存）
+    """
+    _instances: Dict[str, AgentMemory] = {}
+    
+    @classmethod
+    def get_memory(cls, user_id: str) -> AgentMemory:
+        """获取指定用户的记忆实例"""
+        if user_id not in cls._instances:
+            cls._instances[user_id] = AgentMemory(user_id)
+        return cls._instances[user_id]
+    
+    @classmethod
+    def get_stats(cls) -> Dict[str, Any]:
+        """获取系统状态统计"""
+        return {
+            "active_users": len(cls._instances),
+            "loaded_memories": sum(1 for m in cls._instances.values() if m._loaded)
+        }
