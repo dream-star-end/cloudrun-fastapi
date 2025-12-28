@@ -12,7 +12,7 @@
 import json
 import logging
 import base64
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union, Sequence, Type, Callable
 
 import httpx
 from langchain_core.callbacks import (
@@ -20,6 +20,7 @@ from langchain_core.callbacks import (
     CallbackManagerForLLMRun,
 )
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -30,6 +31,8 @@ from langchain_core.messages import (
 )
 from langchain_core.messages.tool import ToolCallChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.tools import BaseTool
+from langchain_core.runnables import Runnable
 from pydantic import Field
 
 logger = logging.getLogger(__name__)
@@ -309,17 +312,12 @@ class ChatQwenOmni(BaseChatModel):
             body["modalities"] = ["text"]
             logger.info(f"[ChatQwenOmni] 检测到音频输入，添加 modalities=[\"text\"]")
         
-        # 添加工具（优先使用传入的 tools，否则使用 bind_tools 绑定的工具）
-        tools_to_use = tools
-        if not tools_to_use and self._bound_tools:
-            tools_to_use = self._bound_tools
-            logger.debug(f"[ChatQwenOmni] 使用绑定的工具: {len(tools_to_use)} 个")
-        
-        if tools_to_use:
-            openai_tools = self._convert_tools_to_openai_format(tools_to_use) if not isinstance(tools_to_use[0], dict) else tools_to_use
+        # 添加工具（优先使用传入的 tools）
+        if tools:
+            openai_tools = self._convert_tools_to_openai_format(tools) if not isinstance(tools[0], dict) else tools
             if openai_tools:
                 body["tools"] = openai_tools
-                logger.debug(f"[ChatQwenOmni] 添加工具到请求: {len(openai_tools)} 个")
+                logger.info(f"[ChatQwenOmni] 添加工具到请求: {len(openai_tools)} 个")
         
         # 流式选项
         if stream:
@@ -655,29 +653,10 @@ class ChatQwenOmni(BaseChatModel):
     
     def bind_tools(
         self,
-        tools: List[Any],
+        tools: Sequence[Union[Dict[str, Any], Type, Callable, BaseTool]],
         **kwargs: Any,
-    ) -> "ChatQwenOmni":
-        """绑定工具，返回新的模型实例"""
+    ) -> Runnable[LanguageModelInput, BaseMessage]:
+        """绑定工具"""
         formatted_tools = self._convert_tools_to_openai_format(tools)
-        
-        new_instance = ChatQwenOmni(
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            timeout=self.timeout,
-            streaming=self.streaming,
-        )
-        new_instance._bound_tools = formatted_tools
-        return new_instance
-    
-    @property
-    def _bound_tools(self) -> Optional[List[Dict[str, Any]]]:
-        return getattr(self, "__bound_tools", None)
-    
-    @_bound_tools.setter
-    def _bound_tools(self, value: Optional[List[Dict[str, Any]]]):
-        self.__bound_tools = value
+        return super().bind(tools=formatted_tools, **kwargs)
 
