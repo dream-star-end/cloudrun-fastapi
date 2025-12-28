@@ -28,6 +28,7 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+from langchain_core.messages.tool import ToolCallChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import Field
 
@@ -510,7 +511,14 @@ class ChatQwenOmni(BaseChatModel):
                             if text or tool_call_chunks:
                                 chunk_kwargs = {"content": text or ""}
                                 if tool_call_chunks:
-                                    chunk_kwargs["tool_call_chunks"] = tool_call_chunks
+                                    chunk_kwargs["tool_call_chunks"] = [
+                                        ToolCallChunk(
+                                            name=tc.get("name"),
+                                            args=tc.get("args"),
+                                            id=tc.get("id"),
+                                            index=tc.get("index")
+                                        ) for tc in tool_call_chunks
+                                    ]
                                 
                                 chunk_msg = AIMessageChunk(**chunk_kwargs)
                                 gen_chunk = ChatGenerationChunk(message=chunk_msg)
@@ -575,7 +583,15 @@ class ChatQwenOmni(BaseChatModel):
                                 chunk_kwargs = {"content": text or ""}
                                 if tool_calls:
                                     # 必须使用 tool_call_chunks 参数传递增量工具调用
-                                    chunk_kwargs["tool_call_chunks"] = tool_calls
+                                    # 且必须转换为 ToolCallChunk 对象
+                                    chunk_kwargs["tool_call_chunks"] = [
+                                        ToolCallChunk(
+                                            name=tc.get("name"),
+                                            args=tc.get("args"),
+                                            id=tc.get("id"),
+                                            index=tc.get("index")
+                                        ) for tc in tool_calls
+                                    ]
                                 
                                 chunk_msg = AIMessageChunk(**chunk_kwargs)
                                 gen_chunk = ChatGenerationChunk(message=chunk_msg)
