@@ -530,9 +530,18 @@ class ChatQwenOmni(BaseChatModel):
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         """异步流式生成"""
+        # 调试：检查是否收到工具
+        if "tools" in kwargs:
+            logger.debug(f"[ChatQwenOmni] _astream 收到工具: {len(kwargs['tools'])} 个")
+        
         async with httpx.AsyncClient(timeout=self.timeout, verify=False) as client:
             url = self._get_api_url()
             body = self._build_request_body(messages, stream=True, tools=kwargs.get("tools"))
+            
+            if "tools" in body:
+                logger.debug(f"[ChatQwenOmni] 请求包含工具: {len(body['tools'])} 个")
+            else:
+                logger.debug("[ChatQwenOmni] 请求不包含工具")
             
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
@@ -565,7 +574,8 @@ class ChatQwenOmni(BaseChatModel):
                                 chunk_count += 1
                                 chunk_kwargs = {"content": text or ""}
                                 if tool_calls:
-                                    chunk_kwargs["tool_calls"] = tool_calls
+                                    # 必须使用 tool_call_chunks 参数传递增量工具调用
+                                    chunk_kwargs["tool_call_chunks"] = tool_calls
                                 
                                 chunk_msg = AIMessageChunk(**chunk_kwargs)
                                 gen_chunk = ChatGenerationChunk(message=chunk_msg)
