@@ -194,21 +194,23 @@ class ChatQwenOmni(BaseChatModel):
                                 }
                                 mime_type = mime_type_map.get(audio_format.lower(), f"audio/{audio_format}")
                                 
-                                # 确保 data 字段是完整的 data URL 格式
+                                # 确保 data 字段是纯 Base64 字符串（不带 data: 前缀）
+                                # Qwen-Omni API 要求 input_audio.data 为纯 Base64
                                 if raw_data.startswith("data:"):
-                                    audio_data_url = raw_data
+                                    # 如果已经是 data URL，去掉前缀
+                                    audio_data_base64 = raw_data.split(",")[1]
                                 else:
-                                    audio_data_url = f"data:{mime_type};base64,{raw_data}"
+                                    audio_data_base64 = raw_data
                                 
-                                # Qwen-Omni 格式：使用 input_audio 结构，data 是完整的 data URL
+                                # Qwen-Omni 格式：使用 input_audio 结构
                                 content_parts.append({
                                     "type": "input_audio",
                                     "input_audio": {
-                                        "data": audio_data_url,
+                                        "data": audio_data_base64,
                                         "format": audio_format,
                                     }
                                 })
-                                logger.info(f"[ChatQwenOmni] 添加音频到请求: mime_type={mime_type}, data_url_prefix={audio_data_url[:50]}...")
+                                logger.info(f"[ChatQwenOmni] 添加音频到请求: format={audio_format}, data_len={len(audio_data_base64)}")
                             elif item.get("type") == "image_url":
                                 # 图片也支持
                                 content_parts.append(item)
