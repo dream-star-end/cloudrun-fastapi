@@ -1014,6 +1014,9 @@ class LearningAgent:
         Returns:
             Agent 回复
         """
+        # 确保记忆已加载
+        await self.memory.load()
+
         # 智能模型路由：根据消息类型获取合适的 LLM（需要先获取，才能知道是否支持多模态）
         llm = await self._get_llm_for_message(multimodal)
         
@@ -1181,6 +1184,9 @@ class LearningAgent:
             - text: 语音转录文本（transcription 事件时）
             - model_info: 当前使用的模型信息（model_info 事件时）
         """
+        # 确保记忆已加载
+        await self.memory.load()
+
         # 智能模型路由：根据消息类型获取合适的 LLM（需要先获取，才能知道是否支持多模态）
         llm = await self._get_llm_for_message(multimodal)
         
@@ -1670,6 +1676,9 @@ class LearningAgent:
         
         这是进化机制的体现之一：根据积累的用户数据提供更好的建议
         """
+        # 确保记忆已加载
+        await self.memory.load()
+
         profile = self.memory.get_user_profile()
         
         if not profile:
