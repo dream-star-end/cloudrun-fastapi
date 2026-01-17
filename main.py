@@ -24,6 +24,7 @@ from app.routers.community import router as community_router
 from app.routers.friends import router as friends_router
 from app.routers.chat_private import router as chat_private_router
 from app.routers.websocket import router as websocket_router
+from app.routers.agent_tools import router as agent_tools_router
 
 
 @asynccontextmanager
@@ -91,6 +92,7 @@ app.include_router(community_router)  # 学习社区路由
 app.include_router(friends_router)  # 学友系统路由
 app.include_router(chat_private_router)  # 私聊消息路由
 app.include_router(websocket_router)  # WebSocket 实时消息路由
+app.include_router(agent_tools_router)  # MCP bridge tools (checkin/stats)
 
 
 # ==================== 基础端点 ====================
